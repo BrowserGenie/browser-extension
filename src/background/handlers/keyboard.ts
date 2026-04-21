@@ -68,11 +68,21 @@ async function dispatchKey(tabId: number, keyDef: { key: string; code: string; w
     nativeVirtualKeyCode: keyDef.windowsVirtualKeyCode,
     modifiers: modifierFlags,
   };
+  
   await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', ...base });
+  
   // char event carries the text for printable keys so the input value actually updates
+  // For Enter key we MUST send "\r" (carriage return) NOT "\n" to trigger form submission
   if (keyDef.key.length === 1) {
-    await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'char', key: keyDef.key, text: keyDef.key, modifiers: modifierFlags });
+    await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'char', text: keyDef.key, modifiers: modifierFlags });
+  } else if (keyDef.key === 'Enter') {
+    await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'char', text: '\r', modifiers: modifierFlags });
+  } else if (keyDef.key === 'Space') {
+    await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'char', text: ' ', modifiers: modifierFlags });
+  } else if (keyDef.key === 'Tab') {
+    await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'char', text: '\t', modifiers: modifierFlags });
   }
+  
   await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...base });
 }
 

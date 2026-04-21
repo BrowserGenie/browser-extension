@@ -43,9 +43,12 @@ export function registerInputHandlers(): void {
     await debuggerManager.sendCommand(tabId, 'Input.insertText', { text });
 
     // Submit via Enter key — works because OS focus is on this input
+    // IMPORTANT: For Enter key we MUST send "\r" (carriage return) NOT "\n" to trigger form submission
     if (submit) {
-      await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-      await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+      const enterBase = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 };
+      await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', ...enterBase });
+      await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'char', text: '\r', modifiers: 0 });
+      await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...enterBase });
     }
 
     return { selector, typed: text.length, cleared: clearFirst, submitted: submit };
