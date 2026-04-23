@@ -42,6 +42,43 @@ async function resolveCoordinates(tabId: number, target: TargetSpec): Promise<{ 
   return evalResult.result.value;
 }
 
+function randomDelay(min: number, max: number): Promise<void> {
+  const delay = Math.floor(Math.random() * (max - min + 1)) + min;
+  return new Promise((r) => setTimeout(r, delay));
+}
+
+function bezierCurve(
+  p0: { x: number; y: number },
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+  steps: number
+): Array<{ x: number; y: number }> {
+  const points = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const x = (1 - t) * (1 - t) * p0.x + 2 * (1 - t) * t * p1.x + t * t * p2.x;
+    const y = (1 - t) * (1 - t) * p0.y + 2 * (1 - t) * t * p1.y + t * t * p2.y;
+    points.push({ x: Math.round(x), y: Math.round(y) });
+  }
+  return points;
+}
+
+async function getCurrentMousePosition(tabId: number): Promise<{ x: number; y: number }> {
+  try {
+    const script = `(() => {
+      // We can't actually read mouse position, so return center of viewport as fallback
+      return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    })()`;
+    const result = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: script,
+      returnByValue: true,
+    })) as { result: { value: { x: number; y: number } } };
+    return result.result.value;
+  } catch {
+    return { x: 0, y: 0 };
+  }
+}
+
 const BUTTON_MAP: Record<string, number> = { left: 0, middle: 1, right: 2 };
 
 export function registerClickHandlers(): void {
@@ -56,10 +93,25 @@ export function registerClickHandlers(): void {
     const { x, y } = await resolveCoordinates(tabId, target);
     const buttonNum = BUTTON_MAP[button] ?? 0;
 
-    // Simulate real click: mouseMoved -> mousePressed -> mouseReleased
-    await debuggerManager.sendCommand(tabId, 'Input.dispatchMouseEvent', {
-      type: 'mouseMoved', x, y,
-    });
+    // Get starting position for Bézier curve
+    const startPos = await getCurrentMousePosition(tabId);
+
+    // Generate a control point for a slight curve
+    const midX = (startPos.x + x) / 2 + (Math.random() * 40 - 20);
+    const midY = (startPos.y + y) / 2 + (Math.random() * 40 - 20);
+    const curve = bezierCurve(startPos, { x: midX, y: midY }, { x, y }, 8);
+
+    // Move along Bézier curve
+    for (const point of curve) {
+      await debuggerManager.sendCommand(tabId, 'Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x: point.x, y: point.y,
+      });
+      await randomDelay(5, 15);
+    }
+
+    // Randomized delay before mousedown
+    await randomDelay(20, 80);
+
     await debuggerManager.sendCommand(tabId, 'Input.dispatchMouseEvent', {
       type: 'mousePressed', x, y, button: button === 'middle' ? 'middle' : button === 'right' ? 'right' : 'left',
       clickCount: 1,
@@ -70,6 +122,7 @@ export function registerClickHandlers(): void {
     });
 
     if (doubleClick) {
+      await randomDelay(40, 100);
       await debuggerManager.sendCommand(tabId, 'Input.dispatchMouseEvent', {
         type: 'mousePressed', x, y, button: 'left', clickCount: 2,
       });

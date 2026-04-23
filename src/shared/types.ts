@@ -45,6 +45,13 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     devtools_network: true,
     devtools_storage: true,
     devtools_console: true,
+
+    accessibility: true,
+    emulation: true,
+    elements: true,
+    audit: true,
+    monitoring: true,
+    qa: true,
   },
   wsPort: 7890,
 };

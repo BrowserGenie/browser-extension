@@ -5,13 +5,24 @@ interface ConsoleEntry {
   level: string;
   text: string;
   timestamp: number;
-  url?: string;
-  lineNumber?: number;
+  stackTrace?: Array<{ url: string; lineNumber: number; columnNumber: number; functionName: string }>;
 }
 
 // Store console logs per tab
 const consoleLogs = new Map<number, ConsoleEntry[]>();
 const listeningTabs = new Set<number>();
+
+export function getConsoleLogs(tabId: number, level?: string): ConsoleEntry[] {
+  let logs = consoleLogs.get(tabId) || [];
+  if (level && level !== 'all') {
+    logs = logs.filter((e) => e.level === level);
+  }
+  return [...logs];
+}
+
+export function clearConsoleLogs(tabId: number): void {
+  consoleLogs.set(tabId, []);
+}
 
 function setupConsoleListeners(tabId: number): void {
   if (listeningTabs.has(tabId)) return;
@@ -41,8 +52,12 @@ function setupConsoleListeners(tabId: number): void {
         level: params.type,
         text: args.join(' '),
         timestamp: params.timestamp,
-        url: params.stackTrace?.callFrames?.[0]?.url,
-        lineNumber: params.stackTrace?.callFrames?.[0]?.lineNumber,
+        stackTrace: params.stackTrace?.callFrames?.map((f: any) => ({
+          url: f.url,
+          lineNumber: f.lineNumber,
+          columnNumber: f.columnNumber,
+          functionName: f.functionName,
+        })),
       });
     }
 
@@ -53,8 +68,12 @@ function setupConsoleListeners(tabId: number): void {
         level: 'error',
         text: params.exceptionDetails?.text || params.exceptionDetails?.exception?.description || 'Unknown exception',
         timestamp: params.timestamp,
-        url: params.exceptionDetails?.url,
-        lineNumber: params.exceptionDetails?.lineNumber,
+        stackTrace: params.exceptionDetails?.stackTrace?.callFrames?.map((f: any) => ({
+          url: f.url,
+          lineNumber: f.lineNumber,
+          columnNumber: f.columnNumber,
+          functionName: f.functionName,
+        })),
       });
     }
   });
@@ -71,7 +90,7 @@ export function registerDevtoolsConsoleHandlers(): void {
   registerHandler('get_console_logs', async (params, tabId) => {
     const { level, clear } = params as { level?: string; clear?: boolean };
 
-    await debuggerManager.enableDomain(tabId, 'Runtime');
+    await debuggerManager.ensureAttached(tabId);
     setupConsoleListeners(tabId);
 
     let logs = consoleLogs.get(tabId) || [];
@@ -83,7 +102,7 @@ export function registerDevtoolsConsoleHandlers(): void {
     const result = [...logs];
 
     if (clear) {
-      consoleLogs.set(tabId, []);
+      clearConsoleLogs(tabId);
     }
 
     return result;
@@ -92,7 +111,7 @@ export function registerDevtoolsConsoleHandlers(): void {
   registerHandler('execute_javascript', async (params, tabId) => {
     const { expression } = params as { expression: string };
 
-    await debuggerManager.enableDomain(tabId, 'Runtime');
+    await debuggerManager.ensureAttached(tabId);
 
     const result = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
       expression,

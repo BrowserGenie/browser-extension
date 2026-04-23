@@ -10,13 +10,42 @@ interface NetworkEntry {
   statusText?: string;
   requestHeaders?: Record<string, string>;
   responseHeaders?: Record<string, string>;
+  requestBody?: string;
   timestamp: number;
   responseSize?: number;
+  resourceSize?: number;
+  status: 'pending' | 'complete' | 'failed';
+  errorReason?: string;
+  timing?: {
+    dns: number;
+    connect: number;
+    send: number;
+    receive: number;
+    ssl: number;
+    total: number;
+  };
 }
 
 // Store network logs per tab
 const networkLogs = new Map<number, NetworkEntry[]>();
 const listeningTabs = new Set<number>();
+
+export function getNetworkLogs(tabId: number): NetworkEntry[] {
+  return [...(networkLogs.get(tabId) || [])];
+}
+
+export function getNetworkErrors(tabId: number): NetworkEntry[] {
+  const logs = networkLogs.get(tabId) || [];
+  return logs.filter(
+    (e) =>
+      e.status === 'failed' ||
+      (e.statusCode !== undefined && (e.statusCode >= 400 || e.statusCode === 0))
+  );
+}
+
+export function clearNetworkLogs(tabId: number): void {
+  networkLogs.set(tabId, []);
+}
 
 function setupNetworkListeners(tabId: number): void {
   if (listeningTabs.has(tabId)) return;
@@ -26,7 +55,7 @@ function setupNetworkListeners(tabId: number): void {
     networkLogs.set(tabId, []);
   }
 
-  chrome.debugger.onEvent.addListener((source, method, params: any) => {
+  chrome.debugger.onEvent.addListener(async (source, method, params: any) => {
     if (source.tabId !== tabId) return;
 
     const logs = networkLogs.get(tabId);
@@ -40,6 +69,7 @@ function setupNetworkListeners(tabId: number): void {
         resourceType: params.type || 'Other',
         requestHeaders: params.request.headers,
         timestamp: params.timestamp,
+        status: 'pending',
       });
     }
 
@@ -50,6 +80,49 @@ function setupNetworkListeners(tabId: number): void {
         entry.statusText = params.response.statusText;
         entry.responseHeaders = params.response.headers;
         entry.responseSize = params.response.encodedDataLength;
+        const t = params.response.timing;
+        if (t) {
+          entry.timing = {
+            dns: t.dnsEnd - t.dnsStart,
+            connect: t.connectEnd - t.connectStart,
+            send: t.sendEnd - t.sendStart,
+            receive: t.receiveHeadersEnd - t.sendEnd,
+            ssl: t.sslEnd - t.sslStart,
+            total: t.receiveHeadersEnd - t.requestTime * 1000,
+          };
+        }
+      }
+    }
+
+    if (method === 'Network.loadingFinished') {
+      const entry = logs.find((e) => e.requestId === params.requestId);
+      if (entry) {
+        entry.status = 'complete';
+        entry.resourceSize = params.encodedDataLength;
+      }
+    }
+
+    if (method === 'Network.loadingFailed') {
+      const entry = logs.find((e) => e.requestId === params.requestId);
+      if (entry) {
+        entry.status = 'failed';
+        entry.errorReason = params.errorText || params.type;
+      }
+    }
+
+    if (method === 'Network.requestWillBeSentExtraInfo') {
+      const entry = logs.find((e) => e.requestId === params.requestId);
+      if (entry && (entry.method === 'POST' || entry.method === 'PUT')) {
+        try {
+          const bodyResult = (await debuggerManager.sendCommand(tabId, 'Network.getRequestPostData', {
+            requestId: params.requestId,
+          })) as { postData?: string };
+          if (bodyResult.postData) {
+            entry.requestBody = bodyResult.postData;
+          }
+        } catch {
+          // Post data may not be available
+        }
       }
     }
   });
@@ -62,13 +135,17 @@ function setupNetworkListeners(tabId: number): void {
   });
 }
 
+export function ensureNetworkListeners(tabId: number): void {
+  setupNetworkListeners(tabId);
+}
+
 export function registerDevtoolsNetworkHandlers(): void {
   registerHandler('get_network_logs', async (params, tabId) => {
     const { filter } = params as {
       filter?: { urlPattern?: string; method?: string; statusCode?: number; resourceType?: string };
     };
 
-    await debuggerManager.enableDomain(tabId, 'Network');
+    await debuggerManager.ensureAttached(tabId);
     setupNetworkListeners(tabId);
 
     let logs = networkLogs.get(tabId) || [];
@@ -94,7 +171,7 @@ export function registerDevtoolsNetworkHandlers(): void {
 
   registerHandler('get_network_request_detail', async (params, tabId) => {
     const { requestId, includeBody = false } = params as { requestId: string; includeBody?: boolean };
-    await debuggerManager.enableDomain(tabId, 'Network');
+    await debuggerManager.ensureAttached(tabId);
 
     const logs = networkLogs.get(tabId) || [];
     const entry = logs.find((e) => e.requestId === requestId);

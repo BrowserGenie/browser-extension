@@ -24,6 +24,13 @@ class DebuggerManager {
     await chrome.debugger.attach({ tabId }, CDP_VERSION);
     this.attachedTabs.add(tabId);
     this.enabledDomains.set(tabId, new Set());
+    await this.enableCoreDomains(tabId);
+  }
+
+  async enableCoreDomains(tabId: number): Promise<void> {
+    await this.enableDomain(tabId, 'Network');
+    await this.enableDomain(tabId, 'Runtime');
+    await this.enableDomain(tabId, 'Page');
   }
 
   async enableDomain(tabId: number, domain: string): Promise<void> {

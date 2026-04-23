@@ -123,6 +123,68 @@ export function registerDevtoolsSourcesHandlers(): void {
       contentSize: r.contentSize,
     }));
   });
+
+  registerHandler('find_in_source', async (params, tabId) => {
+    const { pattern, contextLines = 2 } = params as { pattern: string; contextLines?: number };
+    await debuggerManager.ensureAttached(tabId);
+
+    // Get page HTML
+    const htmlScript = `document.documentElement.outerHTML`;
+    const htmlResult = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: htmlScript,
+      returnByValue: true,
+    })) as { result: { value: string } };
+    const html = htmlResult.result.value || '';
+
+    // Get script sources
+    await debuggerManager.enableDomain(tabId, 'Page');
+    const tree = (await debuggerManager.sendCommand(tabId, 'Page.getResourceTree')) as {
+      frameTree: { frame: { id: string }; resources: Array<{ url: string; type: string; mimeType: string }> };
+    };
+    const scripts = tree.frameTree.resources.filter(
+      (r) => r.type === 'Script' || r.mimeType === 'application/javascript' || r.mimeType === 'text/javascript'
+    );
+
+    const regex = new RegExp(pattern, 'gi');
+    const matches: Array<{ source: string; url: string; line: number; context: string; match: string }> = [];
+
+    function searchInText(text: string, url: string) {
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        let m;
+        regex.lastIndex = 0;
+        while ((m = regex.exec(line)) !== null) {
+          const start = Math.max(0, i - contextLines);
+          const end = Math.min(lines.length, i + contextLines + 1);
+          const context = lines.slice(start, end).join('\n');
+          matches.push({
+            source: url === '__html__' ? 'HTML' : 'Script',
+            url,
+            line: i + 1,
+            context,
+            match: m[0],
+          });
+        }
+      }
+    }
+
+    searchInText(html, '__html__');
+
+    const frameId = tree.frameTree.frame.id;
+    for (const script of scripts) {
+      try {
+        const content = (await debuggerManager.sendCommand(tabId, 'Page.getResourceContent', {
+          frameId, url: script.url,
+        })) as { content: string };
+        searchInText(content.content, script.url);
+      } catch {
+        // Skip unreadable scripts
+      }
+    }
+
+    return { pattern, matchCount: matches.length, matches: matches.slice(0, 100) };
+  });
 }
 
 async function getMainFrameId(tabId: number): Promise<string> {

@@ -13,6 +13,13 @@ const FEATURE_LABELS: Record<string, string> = {
   devtools_network: 'DevTools: Network Logs',
   devtools_storage: 'DevTools: Storage (Cookies/LS/SS)',
   devtools_console: 'DevTools: Console & JS Execution',
+
+  accessibility: 'Visual Verification & A11y Tree',
+  emulation: 'Viewport & Device Emulation',
+  elements: 'Smart Selectors & Element State',
+  audit: 'Auditing (A11y, Security, Performance)',
+  monitoring: 'Cross-tab & Event Monitoring',
+  qa: 'QA Testing Primitives',
 };
 
 let settings: ExtensionSettings;

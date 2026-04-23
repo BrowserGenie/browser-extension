@@ -95,16 +95,25 @@ Enable or disable entire capability categories at runtime without reloading the 
 | Toggle | Tools controlled |
 |--------|-----------------|
 | Navigation | `navigate_to_url`, `navigate_back`, `navigate_forward`, `navigate_reload` |
-| Tab Management | `list_tabs`, `select_tab`, `new_tab`, `close_tab` |
+| Tab Management | `list_tabs`, `select_tab`, `new_tab`, `close_tab`, `get_tab_state`, `assert_tabs_match`, `test_storage_sync` |
 | Keyboard Input | `press_key`, `type_text` |
 | Click / Drag / Hover | `click_element`, `input_and_type`, `drag_and_drop`, `hover_element` |
 | Screenshots | `screenshot_viewport`, `screenshot_full_page` |
+| Gestures | `swipe`, `long_press`, `pinch`, `double_tap` |
+| Macros | `start_recording_macro`, `stop_recording_macro`, `replay_macro` |
 
-| DevTools: Sources | `read_page_html`, `read_stylesheets`, `read_scripts`, `read_page_resources` |
+| DevTools: Sources | `read_page_html`, `read_stylesheets`, `read_scripts`, `read_page_resources`, `find_in_source` |
 | DevTools: Modify DOM/CSS | `modify_html`, `modify_css` |
 | DevTools: Network Logs | `get_network_logs`, `get_network_request_detail`, `clear_network_logs` |
 | DevTools: Storage | cookies, localStorage, sessionStorage (get/set/delete) |
 | DevTools: Console | `get_console_logs`, `execute_javascript` |
+
+| Accessibility | `browser_snapshot`, `get_element_layout`, `detect_layout_issues`, `compare_snapshots`, `get_accessibility_tree`, `diff_page_source` |
+| Auditing | `run_accessibility_audit`, `check_color_contrast`, `get_tab_order`, `get_performance_metrics`, `check_font_loading`, `audit_broken_resources`, `check_security_headers`, `detect_cookie_banners`, `record_performance_timeline`, `record_focus_path` |
+| QA & Assertions | `assert_element`, `check_form_validity`, `tab_to_next`, `set_input_files`, `emulate_network_conditions`, `intercept_requests`, `snapshot_page_state`, `restore_page_state`, `wait_for_condition`, `assert_no_console_errors`, `assert_no_network_errors`, `get_network_errors`, `stress_test_refresh`, `assert_css_property`, `assert_network_request_made`, `assert_page_load_time`, `get_all_issues` |
+| Element Inspection | `find_element`, `get_element_state`, `query_shadow_dom`, `deep_query_shadow_dom`, `get_shadow_dom_tree`, `get_computed_styles` |
+| Emulation | `resize_viewport`, `emulate_device`, `reset_viewport`, `get_active_media_queries`, `get_viewport_info` |
+| Monitoring | `monitor_storage_events`, `monitor_cookie_changes`, `monitor_console_events` |
 
 ## Project Structure
 
@@ -128,18 +137,28 @@ browser-genie-extension/
 │   │       ├── hover.ts
 │   │       ├── drag-drop.ts
 │   │       ├── screenshot.ts
-
+│   │       ├── gestures.ts     # Touch gesture simulation (swipe, pinch, long-press, double-tap)
+│   │       ├── macros.ts       # Macro recording & replay
 │   │       ├── devtools-sources.ts
 │   │       ├── devtools-modify.ts
 │   │       ├── devtools-network.ts
 │   │       ├── devtools-storage.ts
-│   │       └── devtools-console.ts
+│   │       ├── devtools-console.ts
+│   │       ├── accessibility.ts
+│   │       ├── emulation.ts
+│   │       ├── elements.ts
+│   │       ├── audit.ts
+│   │       ├── interaction.ts
+│   │       ├── monitoring.ts
+│   │       └── qa.ts
 │   ├── content/                # Content scripts injected into pages
 │   │   ├── click-handler.ts    # Real mouse event simulation
 │   │   ├── drag-handler.ts     # Drag & drop simulation
 │   │   ├── hover-handler.ts    # Hover / :hover state triggering
-│   │   └── input-handler.ts    # Input field interaction
-
+│   │   ├── input-handler.ts    # Input field interaction
+│   │   ├── axe-entry.ts        # axe-core accessibility audit bundling
+│   │   ├── storage-monitor.ts  # localStorage / sessionStorage event monitoring
+│   │   └── macro-recorder.ts   # User action recording for macro replay
 │   ├── popup/                  # Extension popup UI
 │   │   ├── popup.html
 │   │   ├── popup.css
@@ -196,6 +215,12 @@ Chrome MV3 service workers terminate after ~30 seconds of inactivity. The extens
 ### Network Log Collection
 Network log collection starts from when the debugger first attaches to a tab. To capture traffic from the beginning of a page load, call a DevTools tool (e.g. `execute_javascript`) before the navigation.
 
+### Bot-Mitigation & Human-Like Behavior
+All interaction tools (click, type, hover) include randomized delays and natural mouse movement patterns to avoid bot detection signatures:
+- **Click**: Bézier curve mouse movement from current position to target, with 20-80ms randomized pre-click delay
+- **Type**: Per-character jitter (±10ms), randomized delays between key events
+- **Hover**: 50-150ms randomized dwell time
+- **Touch gestures**: Realistic `force`, `radiusX`, `radiusY`, and `rotationAngle` properties
 
 ## Contributing
 

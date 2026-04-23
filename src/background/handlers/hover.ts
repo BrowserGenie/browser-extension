@@ -25,6 +25,11 @@ async function resolveCoordinates(tabId: number, target: TargetSpec): Promise<{ 
   return result.result.value;
 }
 
+function randomDelay(min: number, max: number): Promise<void> {
+  const delay = Math.floor(Math.random() * (max - min + 1)) + min;
+  return new Promise((r) => setTimeout(r, delay));
+}
+
 export function registerHoverHandlers(): void {
   registerHandler('hover_element', async (params, tabId) => {
     const { target } = params as { target: TargetSpec };
@@ -35,6 +40,9 @@ export function registerHoverHandlers(): void {
     await debuggerManager.sendCommand(tabId, 'Input.dispatchMouseEvent', {
       type: 'mouseMoved', x, y,
     });
+
+    // Randomized dwell time for human-like behavior
+    await randomDelay(50, 150);
 
     return { x, y };
   });

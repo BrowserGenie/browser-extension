@@ -9,7 +9,9 @@ module.exports = {
     'content/drag-handler': './src/content/drag-handler.ts',
     'content/hover-handler': './src/content/hover-handler.ts',
     'content/input-handler': './src/content/input-handler.ts',
-
+    'content/axe': './src/content/axe-entry.ts',
+    'content/storage-monitor': './src/content/storage-monitor.ts',
+    'content/macro-recorder': './src/content/macro-recorder.ts',
   },
   output: {
     path: path.resolve(__dirname, 'dist'),

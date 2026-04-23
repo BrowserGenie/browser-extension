@@ -17,6 +17,16 @@ import { registerDevtoolsNetworkHandlers } from './handlers/devtools-network.js'
 import { registerDevtoolsStorageHandlers } from './handlers/devtools-storage.js';
 import { registerDevtoolsConsoleHandlers } from './handlers/devtools-console.js';
 
+import { registerAccessibilityHandlers } from './handlers/accessibility.js';
+import { registerEmulationHandlers } from './handlers/emulation.js';
+import { registerElementHandlers } from './handlers/elements.js';
+import { registerAuditHandlers } from './handlers/audit.js';
+import { registerInteractionHandlers } from './handlers/interaction.js';
+import { registerMonitoringHandlers } from './handlers/monitoring.js';
+import { registerQaHandlers } from './handlers/qa.js';
+import { registerGestureHandlers } from './handlers/gestures.js';
+import { registerMacroHandlers } from './handlers/macros.js';
+
 // Initialize all handlers
 registerNavigationHandlers();
 registerTabManagementHandlers();
@@ -32,6 +42,16 @@ registerDevtoolsModifyHandlers();
 registerDevtoolsNetworkHandlers();
 registerDevtoolsStorageHandlers();
 registerDevtoolsConsoleHandlers();
+
+registerAccessibilityHandlers();
+registerEmulationHandlers();
+registerElementHandlers();
+registerAuditHandlers();
+registerInteractionHandlers();
+registerMonitoringHandlers();
+registerQaHandlers();
+registerGestureHandlers();
+registerMacroHandlers();
 
 // Set up WebSocket message handling
 wsClient.onMessage(async (request) => {

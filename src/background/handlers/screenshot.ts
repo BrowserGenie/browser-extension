@@ -8,8 +8,6 @@ export function registerScreenshotHandlers(): void {
     const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
     const captureOptions: chrome.tabs.CaptureVisibleTabOptions = { format: format === 'jpeg' ? 'jpeg' : 'png', quality };
 
-    // captureVisibleTab can fail with "image readback failed" if the compositor
-    // isn't ready; retry once before falling back to CDP Page.captureScreenshot.
     let dataUrl: string | undefined;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -19,7 +17,6 @@ export function registerScreenshotHandlers(): void {
         if (attempt === 0) {
           await new Promise((r) => setTimeout(r, 200));
         } else {
-          // CDP fallback
           await debuggerManager.ensureAttached(tabId);
           const result = (await debuggerManager.sendCommand(tabId, 'Page.captureScreenshot', {
             format: format === 'jpeg' ? 'jpeg' : 'png',
@@ -39,7 +36,6 @@ export function registerScreenshotHandlers(): void {
     const { format = 'png', quality } = params as { format?: 'png' | 'jpeg'; quality?: number };
     await debuggerManager.ensureAttached(tabId);
 
-    // Get page metrics
     const metrics = (await debuggerManager.sendCommand(tabId, 'Page.getLayoutMetrics')) as {
       contentSize: { width: number; height: number };
       cssContentSize: { width: number; height: number };
@@ -48,7 +44,6 @@ export function registerScreenshotHandlers(): void {
     const width = Math.ceil(metrics.cssContentSize.width);
     const height = Math.ceil(metrics.cssContentSize.height);
 
-    // Override device metrics for full page
     await debuggerManager.sendCommand(tabId, 'Emulation.setDeviceMetricsOverride', {
       mobile: false,
       width,
@@ -63,8 +58,61 @@ export function registerScreenshotHandlers(): void {
       captureBeyondViewport: true,
     })) as { data: string };
 
-    // Reset device metrics
     await debuggerManager.sendCommand(tabId, 'Emulation.clearDeviceMetricsOverride');
+
+    return {
+      image: result.data,
+      mimeType: format === 'jpeg' ? 'image/jpeg' : 'image/png',
+    };
+  });
+
+  registerHandler('screenshot_element', async (params, tabId) => {
+    const { selector, selectorType = 'css', format = 'png', quality } = params as {
+      selector: string;
+      selectorType?: 'css' | 'xpath';
+      format?: 'png' | 'jpeg';
+      quality?: number;
+    };
+    await debuggerManager.ensureAttached(tabId);
+
+    const findScript = selectorType === 'css'
+      ? `(() => {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.x, y: r.y, width: r.width, height: r.height };
+        })()`
+      : `(() => {
+          const res = document.evaluate(${JSON.stringify(selector)}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+          const el = res.singleNodeValue;
+          if (!el || !(el instanceof Element)) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.x, y: r.y, width: r.width, height: r.height };
+        })()`;
+
+    const evalResult = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: findScript,
+      returnByValue: true,
+    })) as { result: { value: { x: number; y: number; width: number; height: number } | null } };
+
+    if (!evalResult.result.value) {
+      throw new Error(`Element not found: ${selector}`);
+    }
+
+    const { x, y, width, height } = evalResult.result.value;
+    const clip = {
+      x: Math.round(x),
+      y: Math.round(y),
+      width: Math.round(width),
+      height: Math.round(height),
+      scale: 1,
+    };
+
+    const result = (await debuggerManager.sendCommand(tabId, 'Page.captureScreenshot', {
+      format: format === 'jpeg' ? 'jpeg' : 'png',
+      quality: format === 'jpeg' ? (quality ?? 80) : undefined,
+      clip,
+    })) as { data: string };
 
     return {
       image: result.data,

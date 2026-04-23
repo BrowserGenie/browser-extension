@@ -4,7 +4,11 @@
   "private": true,
   "scripts": {
     "build": "webpack --mode production",
-    "dev": "webpack --mode development --watch"
+    "dev": "webpack --mode development --watch",
+    "zip": "npm run build && cd dist && zip -r ../browser-genie-extension.zip . -x '*.map' '*.d.ts' '*.d.ts.map'"
+  },
+  "dependencies": {
+    "axe-core": "^4.10.0"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",
