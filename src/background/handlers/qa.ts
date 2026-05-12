@@ -388,17 +388,18 @@ export function registerQaHandlers(): void {
     };
     await debuggerManager.ensureAttached(tabId);
 
+    // Wrap user expression so any thrown error OR non-truthy / undefined return
+    // resolves to false instead of surfacing as a Runtime.evaluate exception.
+    const safeEval = `(() => { try { return Boolean((function(){ return (${expression}); })()); } catch (e) { return false; } })()`;
     const script = `(() => {
       return new Promise((resolve) => {
         const deadline = Date.now() + ${timeout};
         const poll = () => {
-          try {
-            if (${expression}) return resolve({ conditionMet: true, elapsedMs: ${timeout} - (deadline - Date.now()) });
-            if (Date.now() > deadline) return resolve({ conditionMet: false, elapsedMs: ${timeout} });
-            setTimeout(poll, ${interval});
-          } catch (e) {
-            resolve({ conditionMet: false, elapsedMs: ${timeout}, error: e.message });
-          }
+          let ok = false;
+          try { ok = ${safeEval}; } catch (e) { ok = false; }
+          if (ok) return resolve({ conditionMet: true, elapsedMs: ${timeout} - (deadline - Date.now()) });
+          if (Date.now() > deadline) return resolve({ conditionMet: false, elapsedMs: ${timeout} });
+          setTimeout(poll, ${interval});
         };
         poll();
       });

@@ -42,7 +42,13 @@ npm run build
 
 This produces a `dist/` directory — the built extension ready to be loaded into Chrome.
 
-### 2. Load into Chrome
+### 2. Install from Chrome Web Store (recommended)
+
+Install **BrowserGenie** directly from the Chrome Web Store:
+
+[Chrome Web Store — BrowserGenie](https://chromewebstore.google.com/detail/browsergenie/gaajfmclkhmjgjdepemhofhbkdponoff)
+
+### 3. Load unpacked (development)
 
 1. Open Chrome and navigate to `chrome://extensions`
 2. Enable **Developer mode** (toggle in the top-right corner)
@@ -50,7 +56,7 @@ This produces a `dist/` directory — the built extension ready to be loaded int
 4. Select the `dist/` folder inside this repository
 5. The extension icon appears in the Chrome toolbar
 
-### 3. Start the MCP server
+### 4. Start the MCP server
 
 Install and run the [BrowserGenie MCP Server](https://github.com/BrowserGenie/mcp). The extension connects to it automatically on startup.
 

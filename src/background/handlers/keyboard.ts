@@ -30,13 +30,41 @@ const KEY_DEFINITIONS: Record<string, { key: string; code: string; keyCode: numb
   F12: { key: 'F12', code: 'F12', keyCode: 123, windowsVirtualKeyCode: 123 },
 };
 
-function getModifierFlags(modifiers?: string[]): number {
+let cachedIsMac: boolean | null = null;
+async function isMac(): Promise<boolean> {
+  if (cachedIsMac !== null) return cachedIsMac;
+  try {
+    const info = await chrome.runtime.getPlatformInfo();
+    cachedIsMac = info.os === 'mac';
+  } catch {
+    cachedIsMac = false;
+  }
+  return cachedIsMac;
+}
+
+/**
+ * Turn a list of modifier names into CDP modifier bits (Alt=1, Ctrl=2, Meta=4, Shift=8).
+ *
+ * Special modifiers:
+ *   - "CmdOrCtrl" / "Accel" — automatically maps to Meta on macOS and Control elsewhere,
+ *     so callers don't have to branch per-OS for shortcuts like select-all / copy / paste.
+ */
+async function getModifierFlags(modifiers?: string[]): Promise<number> {
   let flags = 0;
-  if (modifiers) {
-    if (modifiers.includes('Alt')) flags |= 1;
-    if (modifiers.includes('Control')) flags |= 2;
-    if (modifiers.includes('Meta')) flags |= 4;
-    if (modifiers.includes('Shift')) flags |= 8;
+  if (!modifiers) return flags;
+  const mac = await isMac();
+  for (const mod of modifiers) {
+    switch (mod) {
+      case 'Alt': flags |= 1; break;
+      case 'Control': flags |= 2; break;
+      case 'Meta': flags |= 4; break;
+      case 'Shift': flags |= 8; break;
+      case 'CmdOrCtrl':
+      case 'Accel':
+        flags |= mac ? 4 : 2;
+        break;
+      default: break;
+    }
   }
   return flags;
 }
@@ -104,7 +132,7 @@ export function registerKeyboardHandlers(): void {
       await resolveAndClickElement(tabId, selector, selectorType);
     }
 
-    const modifierFlags = getModifierFlags(modifiers);
+    const modifierFlags = await getModifierFlags(modifiers);
     const keyDef = KEY_DEFINITIONS[key];
 
     if (keyDef) {

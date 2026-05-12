@@ -8,7 +8,7 @@ const COMMAND_CATEGORIES: Record<string, string> = {
   navigate_to_url: 'navigation', navigate_back: 'navigation', navigate_forward: 'navigation', navigate_reload: 'navigation',
   list_tabs: 'tabs', select_tab: 'tabs', new_tab: 'tabs', close_tab: 'tabs',
   press_key: 'keyboard', type_text: 'keyboard',
-  click_element: 'interaction', input_and_type: 'interaction', drag_and_drop: 'interaction', hover_element: 'interaction',
+  click_element: 'interaction', input_and_type: 'interaction', select_from_autocomplete: 'interaction', drag_and_drop: 'interaction', hover_element: 'interaction',
   screenshot_viewport: 'screenshots', screenshot_full_page: 'screenshots', screenshot_element: 'screenshots',
 
   read_page_html: 'devtools_sources', read_stylesheets: 'devtools_sources', read_scripts: 'devtools_sources', read_page_resources: 'devtools_sources',

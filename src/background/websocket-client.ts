@@ -39,6 +39,8 @@ class WebSocketClient {
         this.reconnectAttempt = 0;
         chrome.alarms.clear(RECONNECT_ALARM);
         chrome.alarms.create(KEEPALIVE_ALARM_NAME, { periodInMinutes: KEEPALIVE_INTERVAL_MINUTES });
+        // Identify ourselves to the broker so it knows we're the extension side
+        this.send({ type: 'hello', role: 'extension' });
       };
 
       this.ws.onmessage = async (event) => {

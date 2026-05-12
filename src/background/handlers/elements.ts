@@ -103,17 +103,41 @@ export function registerElementHandlers(): void {
           const res = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
           for (let i = 0; i < res.snapshotLength; i++) results.push(res.snapshotItem(i));
         } else {
-          // Collect candidates and filter by combined criteria
-          const all = Array.from(document.querySelectorAll('body, body *'));
+          // Collect candidates. For text matching, prefer the SMALLEST subtree whose
+          // own text (or a short descendant's text) matches — textContent propagates
+          // up to <body>, so a naive substring check wrongly matches ancestors.
+          const all = Array.from(document.querySelectorAll('body *'));
           results = all.filter(el => {
             if (role && !hasRole(el, role)) return false;
             if (ariaLabel && !(el.getAttribute('aria-label') || '').includes(ariaLabel)) return false;
-            if (text && !(el.textContent || '').includes(text)) return false;
+            if (text) {
+              const txt = (el.textContent || '').trim();
+              if (!txt.includes(text)) return false;
+              // Reject matches that only hit because the element wraps a deeper match.
+              // Keep this element only if no *child* element also contains the text.
+              const childMatches = Array.from(el.children).some(
+                (c) => (c.textContent || '').includes(text)
+              );
+              if (childMatches) return false;
+            }
             return true;
           });
+          // Sort by rendered area ascending so the tightest wrapper wins.
+          if (text) {
+            results.sort((a, b) => {
+              const ar = a.getBoundingClientRect();
+              const br = b.getBoundingClientRect();
+              return (ar.width * ar.height) - (br.width * br.height);
+            });
+          }
         }
         const el = results[nth];
         if (!el) return { found: false, candidateCount: results.length };
+        // Safety net: callers should never get <body> back from a find_element(text=...)
+        // call when the text didn't match a specific element — that's a false positive.
+        if (el.tagName === 'BODY' && (text || role || ariaLabel)) {
+          return { found: false, candidateCount: 0, reason: 'no specific element matched' };
+        }
         const r = el.getBoundingClientRect();
         const attrs = {};
         for (const attr of el.attributes) {
