@@ -26,6 +26,7 @@ import { registerMonitoringHandlers } from './handlers/monitoring.js';
 import { registerQaHandlers } from './handlers/qa.js';
 import { registerGestureHandlers } from './handlers/gestures.js';
 import { registerMacroHandlers } from './handlers/macros.js';
+import { registerDomTreeHandlers, handleDomTreeUpdate, recordAction } from './handlers/dom-tree.js';
 
 // Initialize all handlers
 registerNavigationHandlers();
@@ -52,10 +53,25 @@ registerMonitoringHandlers();
 registerQaHandlers();
 registerGestureHandlers();
 registerMacroHandlers();
+registerDomTreeHandlers();
+
+// Record user actions in DOM tree history
+const originalHandleCommand = handleCommand;
+const wrappedHandleCommand = async (request: any) => {
+  const result = await originalHandleCommand(request);
+  try {
+    if (request.tabId && request.command && !request.command.startsWith('get_') && !request.command.startsWith('list_')) {
+      recordAction(request.tabId, request.command, request.params || {});
+    }
+  } catch {
+    // Non-fatal
+  }
+  return result;
+};
 
 // Set up WebSocket message handling
 wsClient.onMessage(async (request) => {
-  await handleCommand(request);
+  await wrappedHandleCommand(request);
 });
 
 // Connect to MCP server
@@ -66,13 +82,19 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   wsClient.handleAlarm(alarm.name);
 });
 
-// Handle messages from popup
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+// Handle messages from popup and content scripts
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'get-connection-status') {
     sendResponse({ connected: wsClient.isConnected });
     return false;
   }
-  // Forward other messages (e.g., offscreen document responses) — handled by their respective handlers
+  if (message.type === 'dom-tree-update') {
+    const tabId = sender.tab?.id;
+    if (tabId !== undefined) {
+      handleDomTreeUpdate(tabId, message.payload);
+    }
+    return false;
+  }
   return false;
 });
 

@@ -25,8 +25,14 @@ class DebuggerManager {
       if (method !== 'Page.javascriptDialogOpening' || source.tabId === undefined) return;
       const dlg = params as { type?: string; message?: string; defaultPrompt?: string };
       // Always accept beforeunload (the "leave site?" reload warning). For alert/confirm/prompt
-      // we also accept by default — this matches "automation" semantics; power users can add
-      // their own intercept handlers later if they need to refuse.
+      // we still accept by default to avoid automation hangs, but log a warning so users
+      // know an interactive dialog was bypassed.
+      if (dlg.type && dlg.type !== 'beforeunload' && dlg.type !== 'alert' && dlg.type !== 'confirm' && dlg.type !== 'prompt') {
+        // Unknown dialog type — best effort accept
+        console.warn(`[Debugger] Unknown dialog type "${dlg.type}" auto-accepted. Message: ${dlg.message}`);
+      } else if (dlg.type === 'alert' || dlg.type === 'confirm' || dlg.type === 'prompt') {
+        console.warn(`[Debugger] Auto-accepted ${dlg.type} dialog during automation. Message: ${dlg.message}`);
+      }
       chrome.debugger.sendCommand({ tabId: source.tabId }, 'Page.handleJavaScriptDialog', {
         accept: true,
         promptText: dlg.defaultPrompt || '',

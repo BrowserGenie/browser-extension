@@ -12,6 +12,7 @@ module.exports = {
     'content/axe': './src/content/axe-entry.ts',
     'content/storage-monitor': './src/content/storage-monitor.ts',
     'content/macro-recorder': './src/content/macro-recorder.ts',
+    'content/dom-tree': './src/content/dom-tree.ts',
   },
   output: {
     path: path.resolve(__dirname, 'dist'),

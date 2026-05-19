@@ -79,6 +79,13 @@ const COMMAND_CATEGORIES: Record<string, string> = {
   assert_page_load_time: 'qa',
   get_all_issues: 'qa',
 
+  // Advanced QA
+  test_multi_tab_sync: 'qa',
+  test_drag_reorder: 'qa',
+  test_long_text_overflow: 'qa',
+  test_glyph_failure_race: 'qa',
+  test_inline_edit_empty: 'qa',
+
   // Gestures
   swipe: 'gestures',
   long_press: 'gestures',
@@ -102,6 +109,15 @@ const COMMAND_CATEGORIES: Record<string, string> = {
   // Performance
   record_performance_timeline: 'audit',
   record_focus_path: 'audit',
+
+  // DOM Tree
+  get_dom_tree: 'dom_tree',
+  get_dom_node: 'dom_tree',
+  find_dom_nodes: 'dom_tree',
+  get_dom_history: 'dom_tree',
+  get_dom_diff: 'dom_tree',
+  watch_dom: 'dom_tree',
+  get_dom_clickable: 'dom_tree',
 };
 
 type CommandHandler = (params: Record<string, unknown>, tabId: number) => Promise<unknown>;
@@ -125,7 +141,7 @@ function sendResponse(requestId: string, success: boolean, data?: unknown, error
 }
 
 function isChromeInternalUrl(url: string): boolean {
-  return url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('edge://') || url.startsWith('about:');
+  return url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('edge://') || url.startsWith('about:') || url.startsWith('chrome-untrusted://') || url.startsWith('devtools://');
 }
 
 function isInternalPageWeShouldSkip(url: string): boolean {

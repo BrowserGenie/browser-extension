@@ -59,10 +59,16 @@ async function resolveElementInfo(tabId: number, target: TargetSpec): Promise<El
     const wasOffScreen = rBefore.right < 0 || rBefore.left > vw || rBefore.bottom < 0 || rBefore.top > vh;
 
     // Scroll into view if needed — ensures CDP mouse events can reach it
+    // Use standard scrollIntoView with check as fallback for non-WebKit browsers
     if (typeof el.scrollIntoViewIfNeeded === 'function') {
       el.scrollIntoViewIfNeeded(true);
-    } else if (wasOffScreen) {
-      el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    } else {
+      const r0 = el.getBoundingClientRect();
+      const vw = window.innerWidth || document.documentElement.clientWidth;
+      const vh = window.innerHeight || document.documentElement.clientHeight;
+      if (r0.right < 0 || r0.left > vw || r0.bottom < 0 || r0.top > vh) {
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      }
     }
 
     const r = el.getBoundingClientRect();

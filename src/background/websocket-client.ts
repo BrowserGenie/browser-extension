@@ -79,14 +79,21 @@ class WebSocketClient {
   send(data: unknown): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data));
+    } else {
+      console.warn('[WS] Tried to send while disconnected — message dropped');
     }
   }
 
   private scheduleReconnect(): void {
     const delaySec = RECONNECT_DELAYS_SEC[Math.min(this.reconnectAttempt, RECONNECT_DELAYS_SEC.length - 1)];
     this.reconnectAttempt++;
-    // Use chrome.alarms instead of setTimeout — survives service worker suspension
-    chrome.alarms.create(RECONNECT_ALARM, { delayInMinutes: delaySec / 60 });
+    // For delays < 1 minute, use setTimeout (chrome.alarms is unreliable with sub-minute delays).
+    // For longer delays, use chrome.alarms so it survives service worker suspension.
+    if (delaySec < 60) {
+      setTimeout(() => this.connect(), delaySec * 1000);
+    } else {
+      chrome.alarms.create(RECONNECT_ALARM, { delayInMinutes: delaySec / 60 });
+    }
   }
 
   handleAlarm(alarmName: string): void {

@@ -47,13 +47,16 @@ export function registerScreenshotHandlers(): void {
       }
     };
 
-    const captureViaTabs = async (): Promise<{ image: string; mimeType: string } | null> => {
+    const captureViaTabs = async (targetTabId: number): Promise<{ image: string; mimeType: string } | null> => {
       const captureOptions: chrome.tabs.CaptureVisibleTabOptions = {
         format: format === 'jpeg' ? 'jpeg' : 'png',
         quality,
       };
       try {
-        const dataUrl = await chrome.tabs.captureVisibleTab(captureOptions);
+        // Find the window containing the target tab to capture the correct viewport
+        const tab = await chrome.tabs.get(targetTabId);
+        if (!tab.windowId) return null;
+        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, captureOptions);
         const base64 = dataUrl.split(',')[1];
         return { image: base64, mimeType };
       } catch {
@@ -62,7 +65,7 @@ export function registerScreenshotHandlers(): void {
     };
 
     if (method === 'tabs') {
-      const r = await retryCapture(captureViaTabs);
+      const r = await retryCapture(() => captureViaTabs(tabId));
       if (r) return r;
       const c = await retryCapture(captureViaCdp);
       if (c) return c;
@@ -72,7 +75,7 @@ export function registerScreenshotHandlers(): void {
     // method === 'cdp' or 'auto'
     const c = await retryCapture(captureViaCdp);
     if (c) return c;
-    const t = await retryCapture(captureViaTabs);
+    const t = await retryCapture(() => captureViaTabs(tabId));
     if (t) return t;
     throw new Error('Failed to capture viewport screenshot after retries');
   });
@@ -80,6 +83,12 @@ export function registerScreenshotHandlers(): void {
   registerHandler('screenshot_full_page', async (params, tabId) => {
     const { format = 'png', quality } = params as { format?: 'png' | 'jpeg'; quality?: number };
     await debuggerManager.ensureAttached(tabId);
+
+    // Save current scroll position to restore after capture
+    const scrollPos = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: `(() => ({ x: window.scrollX, y: window.scrollY }))()`,
+      returnByValue: true,
+    })) as { result: { value: { x: number; y: number } } };
 
     const metrics = (await debuggerManager.sendCommand(tabId, 'Page.getLayoutMetrics')) as {
       contentSize: { width: number; height: number };
@@ -96,30 +105,40 @@ export function registerScreenshotHandlers(): void {
       deviceScaleFactor: 1,
     });
 
-    const captureFullPage = async (): Promise<{ image: string; mimeType: string } | null> => {
-      try {
-        const result = (await debuggerManager.sendCommand(tabId, 'Page.captureScreenshot', {
-          format: format === 'jpeg' ? 'jpeg' : 'png',
-          quality: format === 'jpeg' ? (quality ?? 80) : undefined,
-          clip: { x: 0, y: 0, width, height, scale: 1 },
-          captureBeyondViewport: true,
-        })) as { data: string };
-        return {
-          image: result.data,
-          mimeType: format === 'jpeg' ? 'image/jpeg' : 'image/png',
-        };
-      } catch {
-        return null;
+    try {
+      const captureFullPage = async (): Promise<{ image: string; mimeType: string } | null> => {
+        try {
+          const result = (await debuggerManager.sendCommand(tabId, 'Page.captureScreenshot', {
+            format: format === 'jpeg' ? 'jpeg' : 'png',
+            quality: format === 'jpeg' ? (quality ?? 80) : undefined,
+            clip: { x: 0, y: 0, width, height, scale: 1 },
+            captureBeyondViewport: true,
+          })) as { data: string };
+          return {
+            image: result.data,
+            mimeType: format === 'jpeg' ? 'image/jpeg' : 'image/png',
+          };
+        } catch {
+          return null;
+        }
+      };
+
+      const result = await retryCapture(captureFullPage);
+      if (!result) {
+        throw new Error('Failed to capture full page screenshot after retries');
       }
-    };
-
-    const result = await retryCapture(captureFullPage);
-    await debuggerManager.sendCommand(tabId, 'Emulation.clearDeviceMetricsOverride');
-
-    if (!result) {
-      throw new Error('Failed to capture full page screenshot after retries');
+      return result;
+    } finally {
+      await debuggerManager.sendCommand(tabId, 'Emulation.clearDeviceMetricsOverride').catch(() => {});
+      // Restore scroll position
+      const pos = scrollPos?.result?.value;
+      if (pos) {
+        await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+          expression: `window.scrollTo(${pos.x}, ${pos.y})`,
+          returnByValue: true,
+        }).catch(() => {});
+      }
     }
-    return result;
   });
 
   registerHandler('screenshot_element', async (params, tabId) => {
@@ -168,10 +187,10 @@ export function registerScreenshotHandlers(): void {
 
     const { x, y, width, height } = evalResult.result.value;
     const clip = {
-      x: Math.round(x),
-      y: Math.round(y),
-      width: Math.round(width),
-      height: Math.round(height),
+      x: Math.floor(x),
+      y: Math.floor(y),
+      width: Math.ceil(width),
+      height: Math.ceil(height),
       scale: 1,
     };
 

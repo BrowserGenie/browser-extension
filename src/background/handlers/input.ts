@@ -81,6 +81,23 @@ export function registerInputHandlers(): void {
     }
     const x = resolved.x!;
     const y = resolved.y!;
+
+    // Guard against typing into a file input (would silently fail or open OS picker)
+    const typeCheckScript = `(() => {
+      const list = document.querySelectorAll(${JSON.stringify(selector)});
+      const el = list[${nth}];
+      return el ? el.type || el.tagName.toLowerCase() : null;
+    })()`;
+    const typeResult = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: typeCheckScript, returnByValue: true,
+    })) as { result: { value: string | null } };
+    const inputType = typeResult.result.value;
+    if (inputType === 'file') {
+      throw new Error(
+        `Cannot type text into a file input. Use the set_input_files tool instead.`
+      );
+    }
+
     const isMac = await isMacPlatform();
     // CDP modifier bits: Alt=1, Control=2, Meta=4, Shift=8
     const selectAllModifier = isMac ? 4 : 2;
