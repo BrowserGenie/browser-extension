@@ -35,11 +35,22 @@ export function registerInputHandlers(): void {
     // Resolve the Nth matching element's center coordinates (0-indexed).
     // Both CSS and XPath paths honor nth: the CSS path uses querySelectorAll and
     // XPath uses ORDERED_NODE_SNAPSHOT_TYPE so multi-match selectors work.
+    // Scroll element into view before resolving coordinates — ensures off-screen
+    // inputs are accessible to CDP mouse events
     const script = selectorType === 'css'
       ? `(() => {
           const list = document.querySelectorAll(${JSON.stringify(selector)});
           const el = list[${nth}];
           if (!el) return { found: false, total: list.length };
+          if (typeof el.scrollIntoViewIfNeeded === 'function') {
+            el.scrollIntoViewIfNeeded(true);
+          } else {
+            const r0 = el.getBoundingClientRect();
+            const vw = window.innerWidth; const vh = window.innerHeight;
+            if (r0.right < 0 || r0.left > vw || r0.bottom < 0 || r0.top > vh) {
+              el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+            }
+          }
           const r = el.getBoundingClientRect();
           return { found: true, total: list.length, x: r.left + r.width / 2, y: r.top + r.height / 2 };
         })()`
@@ -47,6 +58,15 @@ export function registerInputHandlers(): void {
           const res = document.evaluate(${JSON.stringify(selector)}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
           const el = res.snapshotItem(${nth});
           if (!el || !(el instanceof Element)) return { found: false, total: res.snapshotLength };
+          if (typeof el.scrollIntoViewIfNeeded === 'function') {
+            el.scrollIntoViewIfNeeded(true);
+          } else {
+            const r0 = el.getBoundingClientRect();
+            const vw = window.innerWidth; const vh = window.innerHeight;
+            if (r0.right < 0 || r0.left > vw || r0.bottom < 0 || r0.top > vh) {
+              el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+            }
+          }
           const r = el.getBoundingClientRect();
           return { found: true, total: res.snapshotLength, x: r.left + r.width / 2, y: r.top + r.height / 2 };
         })()`;
@@ -139,9 +159,10 @@ export function registerInputHandlers(): void {
     await debuggerManager.enableDomain(tabId, 'Runtime');
 
     // Reuse the same focus/clear/type path as input_and_type, but inline to keep this handler self-contained.
+    // Scroll autocomplete input into view before interacting
     const locateScript = selectorType === 'css'
-      ? `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`
-      : `(() => { const res = document.evaluate(${JSON.stringify(selector)}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); const el = res.singleNodeValue; if (!el || !(el instanceof Element)) return null; const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`;
+      ? `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; if (typeof el.scrollIntoViewIfNeeded === 'function') el.scrollIntoViewIfNeeded(true); const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`
+      : `(() => { const res = document.evaluate(${JSON.stringify(selector)}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); const el = res.singleNodeValue; if (!el || !(el instanceof Element)) return null; if (typeof el.scrollIntoViewIfNeeded === 'function') el.scrollIntoViewIfNeeded(true); const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`;
     const located = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
       expression: locateScript, returnByValue: true,
     })) as { result: { value: { x: number; y: number } | null } };

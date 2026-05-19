@@ -166,50 +166,69 @@ export function registerElementHandlers(): void {
     const { selector, selectorType = 'css' } = params as { selector: string; selectorType?: 'css' | 'xpath' };
     await debuggerManager.ensureAttached(tabId);
 
+    const stateExtractor = `
+      function extractState(el) {
+        if (!el) return { exists: false };
+        const htmlEl = el;
+        const rect = htmlEl.getBoundingClientRect();
+        const style = getComputedStyle(htmlEl);
+
+        // Detect hovered state via :hover pseudo-class match
+        let hovered = false;
+        try { hovered = htmlEl.matches(':hover'); } catch(e) {}
+
+        // Detect active state
+        let active = false;
+        try { active = htmlEl.matches(':active'); } catch(e) {}
+
+        // Detect focus-within
+        let focusWithin = false;
+        try { focusWithin = htmlEl.matches(':focus-within'); } catch(e) {}
+
+        return {
+          exists: true,
+          visible: htmlEl.offsetParent !== null && rect.width > 0,
+          enabled: !htmlEl.disabled,
+          focused: document.activeElement === htmlEl,
+          hovered: hovered,
+          active: active,
+          focusWithin: focusWithin,
+          checked: !!htmlEl.checked,
+          selected: !!htmlEl.selected,
+          readOnly: !!htmlEl.readOnly,
+          required: !!htmlEl.required,
+          valid: htmlEl.checkValidity ? htmlEl.checkValidity() : true,
+          validationMessage: htmlEl.validationMessage || '',
+          // ARIA states — crucial for detecting dropdown/popup/menu open state
+          ariaExpanded: htmlEl.getAttribute('aria-expanded'),
+          ariaPressed: htmlEl.getAttribute('aria-pressed'),
+          ariaSelected: htmlEl.getAttribute('aria-selected'),
+          ariaHasPopup: htmlEl.getAttribute('aria-haspopup'),
+          ariaHidden: htmlEl.getAttribute('aria-hidden'),
+          // CSS state info
+          opacity: style.opacity,
+          pointerEvents: style.pointerEvents,
+          overflow: style.overflow,
+          tagName: htmlEl.tagName,
+          textContent: htmlEl.textContent?.trim().substring(0, 500),
+          value: htmlEl.value,
+          type: htmlEl.type,
+          rect: rect.toJSON(),
+        };
+      }`;
+
     const script = selectorType === 'css'
       ? `(() => {
+          ${stateExtractor}
           const el = document.querySelector(${JSON.stringify(selector)});
-          if (!el) return { exists: false };
-          return {
-            exists: true,
-            visible: el.offsetParent !== null && el.getBoundingClientRect().width > 0,
-            enabled: !el.disabled,
-            focused: document.activeElement === el,
-            checked: !!el.checked,
-            selected: !!el.selected,
-            readOnly: !!el.readOnly,
-            required: !!el.required,
-            valid: el.checkValidity ? el.checkValidity() : true,
-            validationMessage: el.validationMessage || '',
-            tagName: el.tagName,
-            textContent: el.textContent?.trim().substring(0, 500),
-            value: el.value,
-            type: el.type,
-            rect: el.getBoundingClientRect().toJSON(),
-          };
+          return extractState(el);
         })()`
       : `(() => {
+          ${stateExtractor}
           const res = document.evaluate(${JSON.stringify(selector)}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
           const el = res.singleNodeValue;
           if (!el || !(el instanceof Element)) return { exists: false };
-          const htmlEl = el;
-          return {
-            exists: true,
-            visible: htmlEl.offsetParent !== null && htmlEl.getBoundingClientRect().width > 0,
-            enabled: !htmlEl.disabled,
-            focused: document.activeElement === htmlEl,
-            checked: !!htmlEl.checked,
-            selected: !!htmlEl.selected,
-            readOnly: !!htmlEl.readOnly,
-            required: !!htmlEl.required,
-            valid: htmlEl.checkValidity ? htmlEl.checkValidity() : true,
-            validationMessage: htmlEl.validationMessage || '',
-            tagName: htmlEl.tagName,
-            textContent: htmlEl.textContent?.trim().substring(0, 500),
-            value: htmlEl.value,
-            type: htmlEl.type,
-            rect: htmlEl.getBoundingClientRect().toJSON(),
-          };
+          return extractState(el);
         })()`;
 
     const result = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
