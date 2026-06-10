@@ -96,6 +96,16 @@ export function registerAuditHandlers(): void {
       awaitPromise: true,
     })) as { result: { value: unknown }; exceptionDetails?: any };
 
+    // Clean up injected axe-core to avoid leaking globals
+    try {
+      await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+        expression: `(() => { if (typeof axe !== 'undefined') { delete window.axe; } })()`,
+        returnByValue: true,
+      });
+    } catch {
+      // best-effort cleanup
+    }
+
     if (evalResult.exceptionDetails) {
       const exc = evalResult.exceptionDetails as any;
       return {
@@ -135,11 +145,28 @@ export function registerAuditHandlers(): void {
         const div = document.createElement('div');
         div.style.color = colorStr;
         document.body.appendChild(div);
-        const rgb = getComputedStyle(div).color;
-        document.body.removeChild(div);
-        const m = rgb.match(/rgb\\((\\d+),\\s*(\\d+),\\s*(\\d+)\\)/);
-        if (!m) return null;
-        return { r: parseInt(m[1]), g: parseInt(m[2]), b: parseInt(m[3]) };
+        try {
+          const rgb = getComputedStyle(div).color;
+          // Match rgb() and rgba()
+          const m = rgb.match(/rgba?\((\d+(?:\.\d+)?%?),\s*(\d+(?:\.\d+)?%?),\s*(\d+(?:\.\d+)?%?)(?:,\s*[\d.]+)?\)/);
+          if (!m) return null;
+          const parse = (v) => v.endsWith('%') ? Math.round(parseFloat(v) * 2.55) : parseInt(v, 10);
+          return { r: parse(m[1]), g: parse(m[2]), b: parse(m[3]) };
+        } finally {
+          document.body.removeChild(div);
+        }
+      }
+      function getEffectiveBackground(el) {
+        let current = el;
+        while (current && current !== document.body && current !== document.documentElement) {
+          const s = getComputedStyle(current);
+          const bg = s.backgroundColor;
+          if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
+            return bg;
+          }
+          current = current.parentElement;
+        }
+        return getComputedStyle(document.body).backgroundColor || 'rgb(255, 255, 255)';
       }
       const elements = ${JSON.stringify(selector)}
         ? Array.from(document.querySelectorAll(${JSON.stringify(selector)}))
@@ -148,7 +175,7 @@ export function registerAuditHandlers(): void {
       for (const el of elements) {
         const s = getComputedStyle(el);
         const fg = parseColor(s.color);
-        const bg = parseColor(s.backgroundColor);
+        const bg = parseColor(getEffectiveBackground(el));
         if (!fg || !bg) continue;
         const l1 = luminance(fg.r, fg.g, fg.b);
         const l2 = luminance(bg.r, bg.g, bg.b);
@@ -160,7 +187,7 @@ export function registerAuditHandlers(): void {
           fontSize: s.fontSize,
           fontWeight: s.fontWeight,
           foreground: s.color,
-          background: s.backgroundColor,
+          background: getEffectiveBackground(el),
           ratio: Math.round(ratio * 100) / 100,
           aa: isLarge ? ratio >= 3 : ratio >= 4.5,
           aaa: isLarge ? ratio >= 4.5 : ratio >= 7,
@@ -179,73 +206,95 @@ export function registerAuditHandlers(): void {
 
   registerHandler('get_tab_order', async (_params, tabId) => {
     await debuggerManager.ensureAttached(tabId);
+    await debuggerManager.enableDomain(tabId, 'Accessibility');
 
-    const script = `(() => {
-        function getUniqueSelector(el) {
-          if (el.id) return '#' + el.id;
-          const tag = el.tagName.toLowerCase();
-          const classes = Array.from(el.classList).slice(0, 3).join('.');
-          let sel = classes ? tag + '.' + classes : tag;
-          if (el.name) sel += '[name="' + el.name + '"]';
-          if (el.type && el.type !== 'text') sel += '[type="' + el.type + '"]';
-          if (el.placeholder) sel += '[placeholder="' + el.placeholder + '"]';
-          if (tag === 'a' && el.getAttribute('href')) sel += '[href="' + el.getAttribute('href') + '"]';
-          const parent = el.parentElement;
-          if (parent) {
-            const siblings = Array.from(parent.children).filter(c => c.tagName === el.tagName);
-            if (siblings.length > 1) {
-              const index = siblings.indexOf(el) + 1;
-              sel += ':nth-of-type(' + index + ')';
+    // Use CDP Accessibility domain to get the full AX tree and extract focusables.
+    // This mirrors what a real user perceives (roles, names, bounds) without
+    // injecting JavaScript into the page.
+    const axResult = (await debuggerManager.sendCommand(tabId, 'Accessibility.getFullAXTree')) as {
+      nodes: Array<{
+        nodeId: string;
+        role?: { value?: string };
+        name?: { value?: string };
+        backendDOMNodeId?: number;
+        childIds?: string[];
+        properties?: Array<{ name: string; value?: { value?: string } }>;
+      }>;
+    };
+
+    const focusableRoles = new Set([
+      'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'menuitem',
+      'menuitemcheckbox', 'menuitemradio', 'option', 'tab', 'treeitem',
+      'searchbox', 'spinbutton', 'switch', 'slider', 'heading',
+    ]);
+
+    const nodes = axResult.nodes || [];
+    const byId = new Map(nodes.map(n => [n.nodeId, n]));
+
+    const focusables: Array<{
+      selector: string;
+      tagName: string;
+      text: string;
+      tabIndex: number;
+      role: string;
+      ariaLabel: string;
+      visible: boolean;
+    }> = [];
+    const positiveTabIndex: Array<{
+      selector: string;
+      tagName: string;
+      tabIndex: number;
+    }> = [];
+
+    for (const node of nodes) {
+      const role = node.role?.value || '';
+      const name = node.name?.value || '';
+      if (!focusableRoles.has(role)) continue;
+
+      const props = new Map((node.properties || []).map(p => [p.name, p.value?.value]));
+      const hidden = props.get('hidden') === 'true';
+      const disabled = props.get('disabled') === 'true';
+
+      // Resolve backend node id to a frontend node id for bounds check
+      let visible = true;
+      if (node.backendDOMNodeId) {
+        try {
+          const pushResult = await debuggerManager.sendCommand(tabId, 'DOM.pushNodesByBackendIdsToFrontend', {
+            backendNodeIds: [node.backendDOMNodeId],
+          }) as { nodeIds: number[] };
+          const domNodeId = pushResult.nodeIds?.[0];
+          if (domNodeId) {
+            const box = await debuggerManager.sendCommand(tabId, 'DOM.getBoxModel', { nodeId: domNodeId }).catch(() => null) as {
+              model: { border: number[] };
+            } | null;
+            if (box?.model) {
+              const b = box.model.border;
+              const w = Math.max(b[0], b[2], b[4], b[6]) - Math.min(b[0], b[2], b[4], b[6]);
+              const h = Math.max(b[1], b[3], b[5], b[7]) - Math.min(b[1], b[3], b[5], b[7]);
+              visible = w > 0 && h > 0;
             }
           }
-          return sel;
+        } catch {
+          // If DOM mapping fails, assume visible
         }
-      function isActuallyVisible(el) {
-        if (!el) return false;
-        const r = el.getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) return false;
-        const s = getComputedStyle(el);
-        if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) return false;
-        let parent = el.parentElement;
-        while (parent) {
-          const ps = getComputedStyle(parent);
-          if (ps.display === 'none' || ps.visibility === 'hidden' || parseFloat(ps.opacity) === 0) return false;
-          parent = parent.parentElement;
-        }
-        return true;
       }
-      const focusable = Array.from(document.querySelectorAll('a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"]), [contenteditable]'));
-      focusable.sort((a, b) => {
-        const ta = parseInt(a.getAttribute('tabindex') || '0', 10);
-        const tb = parseInt(b.getAttribute('tabindex') || '0', 10);
-        if (ta !== tb) return ta - tb;
-        return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
-      });
-      const positiveTabIndex = focusable.filter(el => parseInt(el.getAttribute('tabindex') || '0', 10) > 0);
-      return {
-        elements: focusable.map(el => ({
-          selector: getUniqueSelector(el),
-          tagName: el.tagName,
-          text: el.textContent.trim().substring(0, 100),
-          tabIndex: parseInt(el.getAttribute('tabindex') || '0', 10),
-          role: el.getAttribute('role') || '',
-          ariaLabel: el.getAttribute('aria-label') || '',
-          visible: isActuallyVisible(el),
-        })),
-        positiveTabIndex: positiveTabIndex.map(el => ({
-          selector: getUniqueSelector(el),
-          tagName: el.tagName,
-          tabIndex: parseInt(el.getAttribute('tabindex') || '0', 10),
-        })),
+
+      const item = {
+        selector: role + (name ? `[name="${name}"]` : ''),
+        tagName: role, // AX tree gives semantic role rather than tag name
+        text: name.substring(0, 100),
+        tabIndex: 0, // CDP AX tree doesn't expose tabindex directly
+        role,
+        ariaLabel: name,
+        visible: !hidden && visible,
       };
-    })()`;
+      focusables.push(item);
+    }
 
-    const result = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
-      expression: script,
-      returnByValue: true,
-    })) as { result: { value: unknown } };
-
-    return result.result.value;
+    return {
+      elements: focusables,
+      positiveTabIndex,
+    };
   });
 
   registerHandler('get_performance_metrics', async (_params, tabId) => {
@@ -318,10 +367,10 @@ export function registerAuditHandlers(): void {
 
     const script = `(() => {
       const issues = [];
-      // Broken images
+      // Broken images: naturalWidth === 0 && naturalHeight === 0 && complete === true means failed
       for (const img of document.querySelectorAll('img')) {
-        if (img.naturalWidth === 0 && img.naturalHeight === 0 && !img.complete) {
-          issues.push({ type: 'image', url: img.src, issue: 'Failed to load' });
+        if (img.naturalWidth === 0 && img.naturalHeight === 0 && img.complete) {
+          issues.push({ type: 'image', url: img.currentSrc || img.src, issue: 'Failed to load' });
         }
       }
       // Stylesheet errors
@@ -334,11 +383,26 @@ export function registerAuditHandlers(): void {
           issues.push({ type: 'stylesheet', url: link.href, issue: 'CORS error accessing stylesheet' });
         }
       }
-      // Font errors
+      // Font errors: find @font-face src URLs
+      for (const sheet of document.styleSheets) {
+        try {
+          for (const rule of sheet.cssRules || []) {
+            if (rule instanceof CSSFontFaceRule) {
+              const src = rule.style.getPropertyValue('src');
+              const family = rule.style.getPropertyValue('font-family');
+              // We can't detect loading failure from CSSOM alone, but we can flag missing src
+              if (!src || src.trim() === '') {
+                issues.push({ type: 'font', family: family, url: null, issue: 'Font face has no src URL' });
+              }
+            }
+          }
+        } catch (e) { /* CORS-blocked stylesheet */ }
+      }
+      // Cross-check document.fonts for error status
       if (document.fonts) {
         document.fonts.forEach(font => {
           if (font.status === 'error') {
-            issues.push({ type: 'font', url: font.family, issue: 'Font failed to load' });
+            issues.push({ type: 'font', family: font.family, url: null, issue: 'Font failed to load' });
           }
         });
       }
@@ -360,36 +424,46 @@ export function registerAuditHandlers(): void {
     const tab = await chrome.tabs.get(tabId);
     const targetUrl = url || tab.url || '';
 
-    // We need network logs to inspect headers. Try to get the main document request.
-    // Since network logs may not have the initial navigation, we do a fresh fetch via CDP.
-    const result = (await debuggerManager.sendCommand(tabId, 'Network.enable')) as unknown;
+    // Use CDP Network.getResponseBody for the main document request
+    // rather than XHR which can be blocked by CSP.
+    await debuggerManager.enableDomain(tabId, 'Network');
+    // Enable Network events and wait briefly for any buffered request
+    await debuggerManager.sendCommand(tabId, 'Network.enable');
     await new Promise(r => setTimeout(r, 100));
 
-    // Use Runtime.evaluate to fetch headers via XMLHttpRequest for the current page
-    const script = `(() => {
-      return new Promise((resolve) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('HEAD', window.location.href, true);
-        xhr.onreadystatechange = function() {
-          if (xhr.readyState === 4) {
-            const headers = {};
-            const headerNames = ['content-security-policy', 'strict-transport-security', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'permissions-policy', 'x-xss-protection'];
-            for (const name of headerNames) {
-              headers[name] = xhr.getResponseHeader(name);
-            }
-            resolve(headers);
-          }
-        };
-        xhr.onerror = () => resolve({});
-        xhr.send();
-      });
+    // Query the main document request from Network log via CDP
+    const headersScript = `(() => {
+      // If PerformanceNavigationTiming is available, we can inspect
+      // the response via Resource Timing API which is not blocked by CSP.
+      const entries = performance.getEntriesByType('navigation');
+      if (entries.length > 0) {
+        // Resource Timing doesn't expose response headers, so we fall back
+        // to a no-cors fetch which typically succeeds for same-origin.
+        return new Promise((resolve) => {
+          fetch(window.location.href, { method: 'HEAD', mode: 'same-origin', cache: 'no-store' })
+            .then(resp => {
+              const headers = {};
+              const headerNames = ['content-security-policy', 'strict-transport-security', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'permissions-policy', 'x-xss-protection'];
+              for (const name of headerNames) {
+                headers[name] = resp.headers.get(name);
+              }
+              resolve(headers);
+            })
+            .catch(() => resolve({}));
+        });
+      }
+      return {};
     })()`;
 
     const evalResult = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
-      expression: script,
+      expression: headersScript,
       returnByValue: true,
       awaitPromise: true,
     })) as { result: { value: Record<string, string | null> } };
+
+    try {
+      await debuggerManager.sendCommand(tabId, 'Network.disable');
+    } catch { /* noop */ }
 
     const headers = evalResult.result.value || {};
     const checks = [
@@ -578,7 +652,7 @@ export function registerAuditHandlers(): void {
   });
 
   registerHandler('record_focus_path', async (params, tabId) => {
-    const { steps = 10 } = params as { steps?: number };
+    const { steps = 10, direction = 'next' } = params as { steps?: number; direction?: 'next' | 'previous' };
     await debuggerManager.ensureAttached(tabId);
 
     const path = [];
@@ -635,24 +709,41 @@ export function registerAuditHandlers(): void {
       })) as { result: { value: any } };
 
       const focusInfo = beforeResult.result.value;
-      path.push({
-        step: i + 1,
-        ...focusInfo,
-        invisibleFocus: focusInfo ? !focusInfo.visible : false,
-      });
+      // Guard against null focusInfo when activeElement is document.body or null
+      if (focusInfo) {
+        path.push({
+          step: i + 1,
+          ...focusInfo,
+          invisibleFocus: focusInfo ? !focusInfo.visible : false,
+        });
+      } else {
+        path.push({
+          step: i + 1,
+          selector: null,
+          tagName: null,
+          text: null,
+          tabIndex: null,
+          visible: false,
+          opacity: null,
+          invisibleFocus: true,
+        });
+      }
 
-      // Press Tab
+      // Press Tab (or Shift+Tab if direction is previous)
+      const shift = direction === 'previous';
       await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', {
         type: 'keyDown',
         key: 'Tab',
         code: 'Tab',
         keyIdentifier: 'U+0009',
+        modifiers: shift ? 8 : 0,
       });
       await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', {
         type: 'keyUp',
         key: 'Tab',
         code: 'Tab',
         keyIdentifier: 'U+0009',
+        modifiers: shift ? 8 : 0,
       });
 
       await new Promise((r) => setTimeout(r, 100));

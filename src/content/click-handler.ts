@@ -1,5 +1,6 @@
 // Content script for click simulation
-// Injected dynamically when needed for "real" DOM event clicks
+// Injected dynamically when needed for JS-only DOM event clicks (explicit method: 'js')
+// NOTE: This is NOT the primary click path. CDP mouse simulation is always preferred.
 
 export function simulateClick(
   selector: string,

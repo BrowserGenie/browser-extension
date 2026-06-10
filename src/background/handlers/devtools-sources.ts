@@ -128,15 +128,17 @@ export function registerDevtoolsSourcesHandlers(): void {
     const { pattern, contextLines = 2 } = params as { pattern: string; contextLines?: number };
     await debuggerManager.ensureAttached(tabId);
 
-    // Get page HTML
-    const htmlScript = `document.documentElement.outerHTML`;
-    const htmlResult = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
-      expression: htmlScript,
-      returnByValue: true,
-    })) as { result: { value: string } };
-    const html = htmlResult.result.value || '';
+    // Get page HTML via CDP DOM domain (no JS injection)
+    await debuggerManager.enableDomain(tabId, 'DOM');
+    const doc = (await debuggerManager.sendCommand(tabId, 'DOM.getDocument', { depth: -1 })) as {
+      root: { nodeId: number };
+    };
+    const outerHtmlResult = (await debuggerManager.sendCommand(tabId, 'DOM.getOuterHTML', {
+      nodeId: doc.root.nodeId,
+    })) as { outerHTML: string };
+    const html = outerHtmlResult.outerHTML || '';
 
-    // Get script sources
+    // Get script sources via CDP Page domain
     await debuggerManager.enableDomain(tabId, 'Page');
     const tree = (await debuggerManager.sendCommand(tabId, 'Page.getResourceTree')) as {
       frameTree: { frame: { id: string }; resources: Array<{ url: string; type: string; mimeType: string }> };

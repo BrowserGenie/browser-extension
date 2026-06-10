@@ -8,7 +8,7 @@ const COMMAND_CATEGORIES: Record<string, string> = {
   navigate_to_url: 'navigation', navigate_back: 'navigation', navigate_forward: 'navigation', navigate_reload: 'navigation',
   list_tabs: 'tabs', select_tab: 'tabs', new_tab: 'tabs', close_tab: 'tabs',
   press_key: 'keyboard', type_text: 'keyboard',
-  click_element: 'interaction', input_and_type: 'interaction', drag_and_drop: 'interaction', hover_element: 'interaction',
+  click_element: 'interaction', input_and_type: 'interaction', select_from_autocomplete: 'interaction', drag_and_drop: 'interaction', hover_element: 'interaction',
   screenshot_viewport: 'screenshots', screenshot_full_page: 'screenshots', screenshot_element: 'screenshots',
 
   read_page_html: 'devtools_sources', read_stylesheets: 'devtools_sources', read_scripts: 'devtools_sources', read_page_resources: 'devtools_sources',
@@ -79,6 +79,13 @@ const COMMAND_CATEGORIES: Record<string, string> = {
   assert_page_load_time: 'qa',
   get_all_issues: 'qa',
 
+  // Advanced QA
+  test_multi_tab_sync: 'qa',
+  test_drag_reorder: 'qa',
+  test_long_text_overflow: 'qa',
+  test_glyph_failure_race: 'qa',
+  test_inline_edit_empty: 'qa',
+
   // Gestures
   swipe: 'gestures',
   long_press: 'gestures',
@@ -102,6 +109,15 @@ const COMMAND_CATEGORIES: Record<string, string> = {
   // Performance
   record_performance_timeline: 'audit',
   record_focus_path: 'audit',
+
+  // DOM Tree
+  get_dom_tree: 'dom_tree',
+  get_dom_node: 'dom_tree',
+  find_dom_nodes: 'dom_tree',
+  get_dom_history: 'dom_tree',
+  get_dom_diff: 'dom_tree',
+  watch_dom: 'dom_tree',
+  get_dom_clickable: 'dom_tree',
 };
 
 type CommandHandler = (params: Record<string, unknown>, tabId: number) => Promise<unknown>;
@@ -125,7 +141,7 @@ function sendResponse(requestId: string, success: boolean, data?: unknown, error
 }
 
 function isChromeInternalUrl(url: string): boolean {
-  return url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('edge://') || url.startsWith('about:');
+  return url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('edge://') || url.startsWith('about:') || url.startsWith('chrome-untrusted://') || url.startsWith('devtools://');
 }
 
 function isInternalPageWeShouldSkip(url: string): boolean {

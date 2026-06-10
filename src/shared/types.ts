@@ -52,6 +52,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     audit: true,
     monitoring: true,
     qa: true,
+    dom_tree: true,
   },
   wsPort: 7890,
 };

@@ -19,14 +19,12 @@ async function getAXTree(tabId: number): Promise<AXNode[]> {
   return result.nodes;
 }
 
-function formatAXTree(nodes: AXNode[], nodeId: string, depth = 0): string {
-  const node = nodes.find((n) => n.nodeId === nodeId);
-  if (!node) return '';
+interface FormatOptions {
+  filter?: string;          // lowercase substring — only keep lines (and their ancestors) whose role or name contains this
+  skipInteresting?: boolean;// when true, drop nodes that are pure presentational structure (no name, no role, no state)
+}
 
-  const role = node.role?.value || '';
-  const name = node.name?.value || '';
-  const value = node.value?.value;
-
+function collectProps(node: AXNode): string[] {
   const props: string[] = [];
   const states = ['focused', 'disabled', 'checked', 'selected', 'expanded', 'required', 'invalid'];
   for (const prop of node.properties || []) {
@@ -40,21 +38,75 @@ function formatAXTree(nodes: AXNode[], nodeId: string, depth = 0): string {
       props.push(`[level=${prop.value.value}]`);
     }
   }
+  const value = node.value?.value;
   if (value !== undefined && value !== '') {
     props.push(`[value="${value}"]`);
   }
+  return props;
+}
 
-  const indent = '  '.repeat(depth);
-  let line = `${indent}- ${role}`;
-  if (name) line += ` "${name}"`;
-  if (props.length) line += ` ${props.join(' ')}`;
-  line += '\n';
+function isInteresting(node: AXNode): boolean {
+  const role = node.role?.value || '';
+  const name = node.name?.value || '';
+  if (name) return true;
+  if (role && role !== 'generic' && role !== 'none' && role !== 'InlineTextBox' && role !== 'StaticText') return true;
+  if ((node.properties || []).some(p => ['focused', 'disabled', 'checked', 'selected', 'expanded'].includes(p.name) && p.value?.value === 'true')) return true;
+  return false;
+}
 
-  for (const childId of node.childIds || []) {
-    line += formatAXTree(nodes, childId, depth + 1);
+function matchesFilter(node: AXNode, filterLower: string): boolean {
+  const role = (node.role?.value || '').toLowerCase();
+  const name = (node.name?.value || '').toLowerCase();
+  const value = String(node.value?.value || '').toLowerCase();
+  return role.includes(filterLower) || name.includes(filterLower) || value.includes(filterLower);
+}
+
+function formatAXTree(
+  nodes: AXNode[],
+  nodeId: string,
+  depth = 0,
+  opts: FormatOptions = {},
+  byId?: Map<string, AXNode>
+): string {
+  const lookup = byId ?? new Map(nodes.map(n => [n.nodeId, n]));
+  const node = lookup.get(nodeId);
+  if (!node) return '';
+
+  // When filtering, only include this subtree if the node itself matches or any descendant does.
+  if (opts.filter) {
+    const anyMatch = subtreeMatches(node, opts.filter.toLowerCase(), lookup);
+    if (!anyMatch) return '';
   }
 
+  const role = node.role?.value || '';
+  const name = node.name?.value || '';
+  const props = collectProps(node);
+
+  const shouldSkipSelf = opts.skipInteresting && !isInteresting(node);
+
+  let line = '';
+  if (!shouldSkipSelf) {
+    const indent = '  '.repeat(depth);
+    line = `${indent}- ${role}`;
+    if (name) line += ` "${name}"`;
+    if (props.length) line += ` ${props.join(' ')}`;
+    line += '\n';
+  }
+
+  const childDepth = shouldSkipSelf ? depth : depth + 1;
+  for (const childId of node.childIds || []) {
+    line += formatAXTree(nodes, childId, childDepth, opts, lookup);
+  }
   return line;
+}
+
+function subtreeMatches(node: AXNode, filterLower: string, lookup: Map<string, AXNode>): boolean {
+  if (matchesFilter(node, filterLower)) return true;
+  for (const cid of node.childIds || []) {
+    const c = lookup.get(cid);
+    if (c && subtreeMatches(c, filterLower, lookup)) return true;
+  }
+  return false;
 }
 
 function filterAXTreeBySelector(nodes: AXNode[], rootNodeId: string, selector: string, tabId: number): Promise<string> {
@@ -66,11 +118,45 @@ function filterAXTreeBySelector(nodes: AXNode[], rootNodeId: string, selector: s
 
 export function registerAccessibilityHandlers(): void {
   registerHandler('browser_snapshot', async (params, tabId) => {
+    const {
+      maxChars,
+      filter,
+      interestingOnly,
+      offset = 0,
+    } = params as {
+      maxChars?: number;
+      filter?: string;
+      interestingOnly?: boolean;
+      offset?: number;
+    };
+
     const nodes = await getAXTree(tabId);
     const root = nodes[0];
-    if (!root) return '';
-    const snapshot = formatAXTree(nodes, root.nodeId);
-    return snapshot;
+    if (!root) return { snapshot: '', totalChars: 0, truncated: false, offset: 0, nextOffset: null };
+
+    const snapshot = formatAXTree(nodes, root.nodeId, 0, {
+      filter: filter || undefined,
+      skipInteresting: interestingOnly ?? (!filter), // on large pages, default to skipping filler roles
+    });
+
+    const totalChars = snapshot.length;
+    const start = Math.max(0, Math.min(offset, totalChars));
+    const limit = Math.max(4_000, Math.min(maxChars ?? 40_000, 500_000));
+    const end = Math.min(totalChars, start + limit);
+    const slice = snapshot.slice(start, end);
+    const truncated = end < totalChars;
+
+    return {
+      snapshot: slice,
+      totalChars,
+      returnedChars: slice.length,
+      offset: start,
+      nextOffset: truncated ? end : null,
+      truncated,
+      hint: truncated
+        ? `Response truncated at ${limit} chars. Call again with offset=${end} to continue, or pass filter="<substring>" to narrow the tree.`
+        : undefined,
+    };
   });
 
   registerHandler('get_element_layout', async (params, tabId) => {

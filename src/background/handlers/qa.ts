@@ -388,17 +388,18 @@ export function registerQaHandlers(): void {
     };
     await debuggerManager.ensureAttached(tabId);
 
+    // Wrap user expression so any thrown error OR non-truthy / undefined return
+    // resolves to false instead of surfacing as a Runtime.evaluate exception.
+    const safeEval = `(() => { try { return Boolean((function(){ return (${expression}); })()); } catch (e) { return false; } })()`;
     const script = `(() => {
       return new Promise((resolve) => {
         const deadline = Date.now() + ${timeout};
         const poll = () => {
-          try {
-            if (${expression}) return resolve({ conditionMet: true, elapsedMs: ${timeout} - (deadline - Date.now()) });
-            if (Date.now() > deadline) return resolve({ conditionMet: false, elapsedMs: ${timeout} });
-            setTimeout(poll, ${interval});
-          } catch (e) {
-            resolve({ conditionMet: false, elapsedMs: ${timeout}, error: e.message });
-          }
+          let ok = false;
+          try { ok = ${safeEval}; } catch (e) { ok = false; }
+          if (ok) return resolve({ conditionMet: true, elapsedMs: ${timeout} - (deadline - Date.now()) });
+          if (Date.now() > deadline) return resolve({ conditionMet: false, elapsedMs: ${timeout} });
+          setTimeout(poll, ${interval});
         };
         poll();
       });
@@ -659,4 +660,404 @@ export function registerQaHandlers(): void {
 
     return result;
   });
+
+  // ---------------------------------------------------------------------------
+  // Advanced QA helpers for detecting common SPA / UI bugs
+  // ---------------------------------------------------------------------------
+
+  /**
+   * test_multi_tab_sync: verify that localStorage (or sessionStorage / cookies)
+   * changes in one tab are reflected in another tab opened to the same URL.
+   */
+  registerHandler('test_multi_tab_sync', async (params, tabId) => {
+    const { storageType = 'localStorage', keyToSet = '_browserGenieTestKey', valueToSet = 'sync-test-value', waitMs = 2000 } = params as {
+      storageType?: 'localStorage' | 'sessionStorage' | 'cookies';
+      keyToSet?: string;
+      valueToSet?: string;
+      waitMs?: number;
+    };
+
+    const originalTab = await chrome.tabs.get(tabId);
+    const testUrl = originalTab.url || 'about:blank';
+
+    // Open a second tab to the same URL
+    const newTab = await chrome.tabs.create({ url: testUrl, active: false });
+    if (!newTab.id) throw new Error('Failed to create second tab');
+    const newTabId = newTab.id;
+
+    await new Promise((r) => setTimeout(r, waitMs));
+
+    // Set value in original tab
+    const setScript = `(() => {
+      try {
+        if (${JSON.stringify(storageType)} === 'localStorage') localStorage.setItem(${JSON.stringify(keyToSet)}, ${JSON.stringify(valueToSet)});
+        else if (${JSON.stringify(storageType)} === 'sessionStorage') sessionStorage.setItem(${JSON.stringify(keyToSet)}, ${JSON.stringify(valueToSet)});
+        else document.cookie = ${JSON.stringify(`${keyToSet}=${valueToSet}; path=/`)}
+        return { success: true };
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
+    })()`;
+    await debuggerManager.ensureAttached(tabId);
+    await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', { expression: setScript, returnByValue: true });
+
+    // Wait briefly for broadcast (storage events are immediate on same-origin)
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Check second tab
+    await debuggerManager.ensureAttached(newTabId);
+    const checkScript = `(() => {
+      try {
+        let value = null;
+        if (${JSON.stringify(storageType)} === 'localStorage') value = localStorage.getItem(${JSON.stringify(keyToSet)});
+        else if (${JSON.stringify(storageType)} === 'sessionStorage') value = sessionStorage.getItem(${JSON.stringify(keyToSet)});
+        else {
+          const match = document.cookie.match(new RegExp('(^| )' + ${JSON.stringify(keyToSet)} + '=([^;]+)'));
+          value = match ? match[2] : null;
+        }
+        return { value, synced: value === ${JSON.stringify(valueToSet)} };
+      } catch (e) {
+        return { value: null, synced: false, error: e.message };
+      }
+    })()`;
+    const checkResult = (await debuggerManager.sendCommand(newTabId, 'Runtime.evaluate', {
+      expression: checkScript,
+      returnByValue: true,
+    })) as { result: { value: { value: string | null; synced: boolean; error?: string } } };
+
+    // Cleanup: remove the test key and close the second tab
+    const cleanupScript = `(() => {
+      if (${JSON.stringify(storageType)} === 'localStorage') localStorage.removeItem(${JSON.stringify(keyToSet)});
+      else if (${JSON.stringify(storageType)} === 'sessionStorage') sessionStorage.removeItem(${JSON.stringify(keyToSet)});
+      else document.cookie = ${JSON.stringify(`${keyToSet}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`)};
+    })()`;
+    await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', { expression: cleanupScript }).catch(() => {});
+    await chrome.tabs.remove(newTabId).catch(() => {});
+
+    return {
+      synced: checkResult.result.value.synced,
+      originalValue: valueToSet,
+      observedValue: checkResult.result.value.value,
+      error: checkResult.result.value.error || null,
+    };
+  });
+
+  /**
+   * test_drag_reorder: determine whether a container (list, grid, table, etc.)
+   * supports drag-and-drop reordering by looking for sortable handles, CSS
+   * cursor styles, draggable attributes, or dragstart event listeners.
+   * Works on any website with sortable lists, kanban boards, galleries, etc.
+   */
+  registerHandler('test_drag_reorder', async (params, tabId) => {
+    const { containerSelector } = params as { containerSelector?: string };
+    await debuggerManager.ensureAttached(tabId);
+
+    const script = `(() => {
+      const container = ${JSON.stringify(containerSelector)}
+        ? document.querySelector(${JSON.stringify(containerSelector)})
+        : document.querySelector('ul, ol, [role="list"], .sortable, .draggable, [class*="sortable"], [class*="draggable"]');
+      if (!container) return { hasSortableContainer: false, reorderable: false, reason: 'No sortable container found' };
+      const items = Array.from(container.children);
+      const results = items.map((el, i) => {
+        const style = getComputedStyle(el);
+        const hasGrabCursor = style.cursor === 'grab' || style.cursor === 'move';
+        const hasHandle = !!el.querySelector('[class*="handle"], [class*="drag"], .sortable-handle, .drag-handle');
+        const hasDraggable = el.getAttribute('draggable') === 'true';
+        // Check for common drag-listener patterns across popular libraries
+        const hasDragListener = typeof el.ondragstart === 'function' ||
+          !!(window.jQuery && window.jQuery(el).data('ui-sortable')) ||
+          !!(window.Sortable && window.Sortable.get && window.Sortable.get(el));
+        return { index: i, tag: el.tagName, hasGrabCursor, hasHandle, hasDraggable, hasDragListener };
+      });
+      const anyReorderable = results.some(r => r.hasGrabCursor || r.hasHandle || r.hasDraggable || r.hasDragListener);
+      return {
+        hasSortableContainer: true,
+        itemCount: items.length,
+        reorderable: anyReorderable,
+        items: results.slice(0, 20),
+        reason: anyReorderable ? 'Detected drag affordances' : 'No drag handles, cursors, or listeners found on children',
+      };
+    })()`;
+
+    const result = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: script,
+      returnByValue: true,
+    })) as { result: { value: unknown } };
+    return result.result.value;
+  });
+
+  /**
+   * test_long_text_overflow: type a very long string into an input/editable
+   * and inspect the rendered output for clipping, horizontal overflow, or
+   * word-breaking artifacts.
+   */
+  registerHandler('test_long_text_overflow', async (params, tabId) => {
+    const { inputSelector, text, submit = true } = params as {
+      inputSelector: string;
+      text?: string;
+      submit?: boolean;
+    };
+    const longText = text || 'Supercalifragilisticexpialidocious pneumonoultramicroscopicsilicovolcanoconiosis antidisestablishmentarianism floccinaucinihilipilification';
+    await debuggerManager.ensureAttached(tabId);
+
+    // Type the long text
+    const typeScript = `(() => {
+      const el = document.querySelector(${JSON.stringify(inputSelector)});
+      if (!el) return { error: 'Input not found' };
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        el.focus();
+        el.value = ${JSON.stringify(longText)};
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      } else if (el.isContentEditable) {
+        el.textContent = ${JSON.stringify(longText)};
+      }
+      return { success: true, tag: el.tagName, textLength: ${JSON.stringify(longText)}.length };
+    })()`;
+    const typeResult = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: typeScript,
+      returnByValue: true,
+    })) as { result: { value: { error?: string; success?: boolean; tag?: string; textLength?: number } } };
+
+    if (typeResult.result.value?.error) {
+      throw new Error(typeResult.result.value.error);
+    }
+
+    if (submit) {
+      await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+        type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+      });
+      await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+      });
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    // Inspect rendered text containers for overflow / clipping / word-break issues
+    const inspectScript = `(() => {
+      const els = Array.from(document.querySelectorAll('p, span, li, td, label, div'));
+      const issues = [];
+      for (const el of els) {
+        const textContent = el.textContent || '';
+        if (!textContent.includes(${JSON.stringify(longText).slice(1, -1).substring(0, 20)})) continue;
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const hasOverflowX = style.overflowX === 'hidden' && (el.scrollWidth > rect.width);
+        const hasOverflowY = style.overflowY === 'hidden' && (el.scrollHeight > rect.height);
+        const wordBreak = style.wordBreak;
+        const whiteSpace = style.whiteSpace;
+        // Detect mid-word truncation (white-space nowrap with overflow hidden)
+        const midWordTruncation = whiteSpace === 'nowrap' && style.overflow === 'hidden' && style.textOverflow === 'ellipsis';
+        issues.push({
+          selector: el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className ? '.' + el.className.split(' ')[0] : ''),
+          textSnippet: textContent.substring(0, 80),
+          hasOverflowX,
+          hasOverflowY,
+          midWordTruncation,
+          wordBreak,
+          whiteSpace,
+          scrollWidth: el.scrollWidth,
+          clientWidth: rect.width,
+        });
+      }
+      return { issues: issues.slice(0, 10), issueCount: issues.length };
+    })()`;
+
+    const inspectResult = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: inspectScript,
+      returnByValue: true,
+    })) as { result: { value: Record<string, unknown> } };
+
+    return {
+      typedLength: longText.length,
+      inputFound: true,
+      ...(inspectResult.result.value || {}),
+    };
+  });
+
+  /**
+   * test_glyph_failure_race: refresh the page multiple times and inspect
+   * all rendered text nodes for replacement / tofu characters (e.g. �, □)
+   * that indicate font-loading race conditions or missing glyphs.
+   */
+  registerHandler('test_glyph_failure_race', async (params, tabId) => {
+    const { iterations = 5, waitAfterReload = 1500, selectors } = params as {
+      iterations?: number;
+      waitAfterReload?: number;
+      selectors?: string[];
+    };
+
+    const failures: Array<{ iteration: number; badGlyphs: number; sampleElements: string[] }> = [];
+    const badCharRegex = /[\uFFFD\u25A1\u25AF\u2B1C\u26F6]/;
+    const targetSelectors = selectors || ['i', '.icon', '.fa', '.material-icons', '[class*="icon"]', 'span', 'button'];
+
+    for (let i = 0; i < iterations; i++) {
+      await chrome.tabs.reload(tabId, { bypassCache: true });
+      await new Promise((r) => setTimeout(r, waitAfterReload));
+      await debuggerManager.ensureAttached(tabId);
+
+      const script = `(() => {
+        const badCharRegex = /[\\uFFFD\\u25A1\\u25AF\\u2B1C\\u26F6]/;
+        const els = Array.from(document.querySelectorAll(${JSON.stringify(targetSelectors.join(', '))}));
+        const bad = [];
+        for (const el of els) {
+          const text = (el.textContent || '').trim();
+          if (badCharRegex.test(text)) {
+            bad.push(el.tagName.toLowerCase() + (el.className ? '.' + el.className.split(' ').slice(0,2).join('.') : ''));
+          }
+        }
+        // Also scan all text nodes in body for replacement characters
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+          if (badCharRegex.test(node.textContent || '')) {
+            const parent = node.parentElement;
+            if (parent) {
+              bad.push('text:' + parent.tagName.toLowerCase() + (parent.className ? '.' + parent.className.split(' ')[0] : ''));
+            }
+          }
+        }
+        // Deduplicate
+        const unique = [...new Set(bad)];
+        return { badCount: unique.length, samples: unique.slice(0, 10) };
+      })()`;
+      const result = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+        expression: script,
+        returnByValue: true,
+      })) as { result: { value: { badCount: number; samples: string[] } } };
+
+      if (result.result.value.badCount > 0) {
+        failures.push({ iteration: i + 1, badGlyphs: result.result.value.badCount, sampleElements: result.result.value.samples });
+      }
+    }
+
+    return {
+      iterations,
+      failures,
+      passed: failures.length === 0,
+      message: failures.length === 0
+        ? 'No font glyph failures detected across all refreshes'
+        : `Detected ${failures.length} refresh cycles with font glyph failures`,
+    };
+  });
+
+  /**
+   * test_inline_edit_empty: double-click an editable element (e.g. a list item
+   * label, a table cell, or any contenteditable), clear its text, submit
+   * (blur / Enter), and check whether the element still exists or was removed.
+   * This detects the common UX bug where editing an item to empty does NOT
+   * delete it, leaving a blank entry in the list/table.
+   */
+  registerHandler('test_inline_edit_empty', async (params, tabId) => {
+    const { elementSelector, useEnterToSubmit = true } = params as {
+      elementSelector: string;
+      useEnterToSubmit?: boolean;
+    };
+    await debuggerManager.ensureAttached(tabId);
+
+    // Check element exists before edit
+    const beforeScript = `(() => {
+      const el = document.querySelector(${JSON.stringify(elementSelector)});
+      return { exists: !!el, text: el ? (el.textContent || el.value || '').trim() : null };
+    })()`;
+    const before = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: beforeScript, returnByValue: true,
+    })) as { result: { value: { exists: boolean; text: string | null } } };
+
+    if (!before.result.value.exists) {
+      throw new Error(`Element not found: ${elementSelector}`);
+    }
+
+    // Double-click to trigger edit mode (works for labels, list items, table cells, etc.)
+    const dblClickScript = `(() => {
+      const el = document.querySelector(${JSON.stringify(elementSelector)});
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy };
+      el.dispatchEvent(new MouseEvent('dblclick', opts));
+      return true;
+    })()`;
+    await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', { expression: dblClickScript, returnByValue: true });
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Clear any focused input / contenteditable and submit empty
+    const clearScript = `(() => {
+      const active = document.activeElement;
+      if (!active) return { cleared: false, reason: 'No focused element after dblclick' };
+      if (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA') {
+        active.value = '';
+        active.dispatchEvent(new Event('input', { bubbles: true }));
+        return { cleared: true, tag: active.tagName, isInput: true };
+      }
+      if (active.isContentEditable) {
+        active.textContent = '';
+        return { cleared: true, tag: active.tagName, isContentEditable: true };
+      }
+      // Fallback: try to find an input sibling or child that appeared
+      const sibling = active.querySelector('input.edit, textarea.edit, [contenteditable]') ||
+        document.querySelector('input.edit, textarea.edit, [contenteditable]');
+      if (sibling && (active.contains(sibling) || sibling === active)) {
+        sibling.focus();
+        if (sibling.tagName === 'INPUT' || sibling.tagName === 'TEXTAREA') {
+          sibling.value = '';
+        } else {
+          sibling.textContent = '';
+        }
+        sibling.dispatchEvent(new Event('input', { bubbles: true }));
+        return { cleared: true, tag: sibling.tagName, fallback: true };
+      }
+      return { cleared: false, reason: 'Focused element is not editable' };
+    })()`;
+    const clearResult = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: clearScript, returnByValue: true,
+    })) as { result: { value: { cleared: boolean; reason?: string; tag?: string } } };
+
+    if (!clearResult.result.value.cleared) {
+      return { before: before.result.value, editTriggered: false, reason: clearResult.result.value.reason };
+    }
+
+    if (useEnterToSubmit) {
+      await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+        type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+      });
+      await debuggerManager.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+      });
+    } else {
+      // Blur to trigger save
+      await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+        expression: `document.activeElement && document.activeElement.blur()`,
+      });
+    }
+    await new Promise((r) => setTimeout(r, 400));
+
+    // Check if element still exists and what its text is
+    const afterScript = `(() => {
+      const el = document.querySelector(${JSON.stringify(elementSelector)});
+      return {
+        exists: !!el,
+        text: el ? (el.textContent || el.value || '').trim() : null,
+        emptyTextSaved: el ? (el.textContent || el.value || '').trim() === '' : false,
+      };
+    })()`;
+    const after = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+      expression: afterScript, returnByValue: true,
+    })) as { result: { value: { exists: boolean; text: string | null; emptyTextSaved: boolean } } };
+
+    return {
+      before: before.result.value,
+      editTriggered: true,
+      after: after.result.value,
+      shouldDeleteWhenEmpty: true, // expectation
+      bugDetected: after.result.value.exists && after.result.value.emptyTextSaved,
+      note: after.result.value.exists && after.result.value.emptyTextSaved
+        ? 'BUG: Empty edit was saved instead of deleting the item'
+        : after.result.value.exists
+          ? 'Item still exists with non-empty text (may have been reverted)'
+          : 'Item was removed after empty edit (correct behavior)',
+    };
+  });
+
+  // Removed: test_add_in_filtered_view was too app-specific (SPA filter-tab switching).
 }
+

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BrowserGenie",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Give AI agents full browser control via MCP — click, type, screenshot, audit, and DevTools access.",
   "permissions": [
     "tabs",
@@ -9,12 +9,19 @@
     "scripting",
     "debugger",
     "storage",
-    "downloads",
     "cookies",
     "alarms"
   ],
   "host_permissions": [
     "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/dom-tree.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
   ],
   "background": {
     "service_worker": "background.js",

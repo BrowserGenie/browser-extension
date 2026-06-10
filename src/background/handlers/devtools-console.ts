@@ -109,22 +109,76 @@ export function registerDevtoolsConsoleHandlers(): void {
   });
 
   registerHandler('execute_javascript', async (params, tabId) => {
-    const { expression } = params as { expression: string };
+    const { expression, timeout = 28000, detach = false } = params as {
+      expression: string;
+      timeout?: number;
+      detach?: boolean;
+    };
 
     await debuggerManager.ensureAttached(tabId);
 
-    const result = (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
-      expression,
-      returnByValue: true,
-      generatePreview: true,
-      awaitPromise: true,
-    })) as { result: { value?: unknown; description?: string; type: string; subtype?: string }; exceptionDetails?: unknown };
+    // Auto-wrap in an IIFE so `const` / `let` at the top level don't pollute the
+    // shared Runtime.evaluate scope and cause "Identifier already declared" on
+    // the next call. Expressions that already look wrapped are left alone so
+    // returning a value from a single-line expression still works.
+    const trimmed = expression.trim();
+    const looksWrapped =
+      /^\(\s*(async\s+)?function[\s\S]*\}\s*\)\s*\(/.test(trimmed) || // (function(){...})()
+      /^\(\s*(async\s*)?\(\s*\)\s*=>/.test(trimmed) ||                // (()=>...)()
+      /^\{[\s\S]*\}$/.test(trimmed);                                   // bare block
+    const wrappedExpr = looksWrapped
+      ? trimmed
+      : `(async () => {\n${trimmed}\n})()`;
 
-    return {
-      result: result.result.value ?? result.result.description ?? null,
-      type: result.result.type,
-      subtype: result.result.subtype,
-      exceptionDetails: result.exceptionDetails,
+    // When `detach` is requested, kick off the expression without waiting for its
+    // promise — callers use this for fire-and-forget long-running work. We still
+    // give the runtime enough time to schedule the microtask.
+    const runWith = async (awaitPromise: boolean) => {
+      return (await debuggerManager.sendCommand(tabId, 'Runtime.evaluate', {
+        expression: wrappedExpr,
+        returnByValue: true,
+        generatePreview: true,
+        awaitPromise,
+        // Isolated world would break shared-scope patterns callers rely on; keep default.
+        timeout: awaitPromise ? Math.max(1000, timeout) : 1000,
+      })) as { result: { value?: unknown; description?: string; type: string; subtype?: string }; exceptionDetails?: unknown };
     };
+
+    if (detach) {
+      await runWith(false);
+      return { result: null, type: 'undefined', detached: true };
+    }
+
+    // Hard wall-clock guard so the MCP round-trip never sits on a stuck evaluate.
+    // If the page's own CDP-level timeout fires first it surfaces via exceptionDetails.
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<'__timeout__'>((resolve) => {
+      timer = setTimeout(() => resolve('__timeout__'), timeout + 2000);
+    });
+
+    try {
+      const raced = await Promise.race([runWith(true), timeoutPromise]);
+      if (raced === '__timeout__') {
+        // Best-effort: interrupt whatever's running on that context so the next
+        // call doesn't collide with a zombie evaluation.
+        try {
+          await debuggerManager.sendCommand(tabId, 'Runtime.terminateExecution');
+        } catch { /* best-effort */ }
+        return {
+          result: null,
+          type: 'timeout',
+          error: `execute_javascript timed out after ${timeout}ms (execution was terminated)`,
+        };
+      }
+      const result = raced as { result: { value?: unknown; description?: string; type: string; subtype?: string }; exceptionDetails?: unknown };
+      return {
+        result: result.result.value ?? result.result.description ?? null,
+        type: result.result.type,
+        subtype: result.result.subtype,
+        exceptionDetails: result.exceptionDetails,
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   });
 }

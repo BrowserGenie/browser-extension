@@ -1,10 +1,10 @@
 {
   "name": "browser-genie-extension",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "private": true,
   "scripts": {
-    "build": "webpack --mode production",
-    "dev": "webpack --mode development --watch",
+    "build": "rm -rf dist && webpack --mode production",
+    "dev": "rm -rf dist && webpack --mode development --watch",
     "zip": "npm run build && cd dist && zip -r ../browser-genie-extension.zip . -x '*.map' '*.d.ts' '*.d.ts.map'"
   },
   "dependencies": {
